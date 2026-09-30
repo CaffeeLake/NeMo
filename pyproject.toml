@@ -79,8 +79,8 @@ classifiers = [
 
 [project.optional-dependencies]
 core = [
-    "hydra-core>1.3,<=1.3.2",
-    "lightning>2.2.1,<=2.4.0",
+    "hydra-core>1.3,<=1.3.7",
+    "lightning>2.2.1,<=2.6.6",
     "omegaconf<=2.3",
     "torchmetrics>=0.11.0",
     "transformers",
@@ -92,8 +92,8 @@ core = [
 ]
 
 lightning = [
-    "hydra-core>1.3,<=1.3.2",
-    "lightning>2.2.1,<=2.4.0",
+    "hydra-core>1.3,<=1.3.7",
+    "lightning>2.2.1,<=2.6.6",
     "omegaconf<=2.3",
     "torchmetrics>=0.11.0",
     "transformers",
@@ -147,8 +147,8 @@ tts = [
     "whisper_normalizer",
     "datasets>=3.2.0",
     "sentencepiece<1.0.0",
-    "hydra-core>1.3,<=1.3.2",
-    "lightning>2.2.1,<=2.4.0",
+    "hydra-core>1.3,<=1.3.7",
+    "lightning>2.2.1,<=2.6.6",
     "omegaconf<=2.3",
     "torchmetrics>=0.11.0",
     "transformers",
@@ -171,8 +171,8 @@ audio = [
     "datasets>=3.2.0",
     "pandas",
     "sentencepiece<1.0.0",
-    "hydra-core>1.3,<=1.3.2",
-    "lightning>2.2.1,<=2.4.0",
+    "hydra-core>1.3,<=1.3.7",
+    "lightning>2.2.1,<=2.6.6",
     "omegaconf<=2.3",
     "torchmetrics>=0.11.0",
     "transformers",
@@ -193,12 +193,12 @@ speechlm2-only = [
 # Install this serving extra separately from the cu*/compiled* extras below.
 vllm = [
     "peft>=0.18.1",
-    "vllm==0.28.0; sys_platform == 'linux'",
+    "vllm==0.30.0; sys_platform == 'linux'",
 ]
 
 all = [
-    "hydra-core>1.3,<=1.3.2",
-    "lightning>2.2.1,<=2.4.0",
+    "hydra-core>1.3,<=1.3.7",
+    "lightning>2.2.1,<=2.6.6",
     "omegaconf<=2.3",
     "torchmetrics>=0.11.0",
     "transformers",
@@ -238,13 +238,13 @@ all = [
 ]
 
 cu12 = [
-    "torch==2.11.0+cu129 ; sys_platform == 'linux'",
+    "torch==2.14.0 ; sys_platform == 'linux'",
     "numba-cuda[cu12] ; platform_system != 'Darwin'",
     "cuda-python>=12,<13 ; platform_system != 'Darwin'"
 ]
 
 cu13 = [
-    "torch==2.12.0+cu132 ; sys_platform == 'linux'",
+    "torch==2.14.0 ; sys_platform == 'linux'",
     "numba-cuda[cu13] ; platform_system != 'Darwin'",
     "cuda-python>=13,<14 ; platform_system != 'Darwin'"
 ]
@@ -281,8 +281,8 @@ common = [
     "einops",
     "pandas",
     "sentencepiece<1.0.0",
-    "hydra-core>1.3,<=1.3.2",
-    "lightning>2.2.1,<=2.4.0",
+    "hydra-core>1.3,<=1.3.7",
+    "lightning>2.2.1,<=2.6.6",
     "omegaconf<=2.3",
     "torchmetrics>=0.11.0",
     "transformers",
@@ -307,8 +307,8 @@ asr = [
     "datasets>=3.2.0",
     "pandas",
     "sentencepiece<1.0.0",
-    "hydra-core>1.3,<=1.3.2",
-    "lightning>2.2.1,<=2.4.0",
+    "hydra-core>1.3,<=1.3.7",
+    "lightning>2.2.1,<=2.6.6",
     "omegaconf<=2.3",
     "torchmetrics>=0.11.0",
     "transformers",
@@ -336,8 +336,8 @@ speechlm2 = [
     "datasets>=3.2.0",
     "pandas",
     "sentencepiece<1.0.0",
-    "hydra-core>1.3,<=1.3.2",
-    "lightning>2.2.1,<=2.4.0",
+    "hydra-core>1.3,<=1.3.7",
+    "lightning>2.2.1,<=2.6.6",
     "omegaconf<=2.3",
     "torchmetrics>=0.11.0",
     "transformers",
