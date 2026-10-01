@@ -1,4 +1,5 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2023, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,7 +16,7 @@
 import copy
 
 import pytest
-from utils.data_prep import Segment, Token, Utterance, Word, add_t_start_end_to_utt_obj
+from nemo.collections.asr.parts.utils.aligner_utils import Segment, Token, Utterance, Word, add_t_start_end_to_utt_obj
 
 OUTPUT_TIMESTEP_DURATION = 0.04
 
@@ -253,7 +254,9 @@ EXPECTED_OUTPUT_UTTERANCE = Utterance(
 
 @pytest.mark.parametrize(
     "alignment,expected_output_utterance, output_timestep_duration",
-    [(ALIGNMENT, EXPECTED_OUTPUT_UTTERANCE, OUTPUT_TIMESTEP_DURATION),],
+    [
+        (ALIGNMENT, EXPECTED_OUTPUT_UTTERANCE, OUTPUT_TIMESTEP_DURATION),
+    ],
 )
 def test_add_t_start_end_to_utt_obj(alignment, expected_output_utterance, output_timestep_duration):
     input_utterance = copy.deepcopy(expected_output_utterance)

@@ -1,4 +1,5 @@
-# Copyright (c) 2022, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -147,7 +148,7 @@ class TestEncDecHybridRNNTCTCModel:
         hybrid_asr_model.compute_eval_loss = False
 
         input_signal = torch.randn(size=(4, 512))
-        length = torch.randint(low=161, high=500, size=[4])
+        length = torch.randint(low=321, high=500, size=[4])
 
         with torch.no_grad():
             # batch size 1
@@ -294,6 +295,8 @@ class TestEncDecHybridRNNTCTCModel:
             'blank_index',
             'tdt_include_duration_confidence',
             'tdt_include_token_duration',
+            'boosting_tree',
+            'boosting_tree_alpha',
         ]
 
         result = assert_dataclass_signature_match(
@@ -312,8 +315,15 @@ class TestEncDecHybridRNNTCTCModel:
             'decoder_model',
             'joint_model',
             'blank_index',
+            'exclude_blank_from_confidence',
             'tdt_include_duration_confidence',
             'tdt_include_token_duration',
+            'ngram_lm_model',
+            'ngram_lm_alpha',
+            'boosting_tree',
+            'boosting_tree_alpha',
+            'fusion_models',
+            'fusion_models_alpha',
         ]
 
         result = assert_dataclass_signature_match(
@@ -328,7 +338,16 @@ class TestEncDecHybridRNNTCTCModel:
 
     @pytest.mark.unit
     def test_BeamRNNTInferConfig(self):
-        IGNORE_ARGS = ['decoder_model', 'joint_model', 'blank_index']
+        IGNORE_ARGS = [
+            'decoder_model',
+            'joint_model',
+            'blank_index',
+            'boosting_tree',
+            'boosting_tree_alpha',
+            'preserve_frame_confidence',
+            'tdt_include_duration_confidence',
+            'confidence_method_cfg',
+        ]
 
         result = assert_dataclass_signature_match(
             beam_decode.BeamRNNTInfer, beam_decode.BeamRNNTInferConfig, ignore_args=IGNORE_ARGS

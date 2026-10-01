@@ -1,4 +1,5 @@
-# Copyright (c) 2020, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2020, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -100,7 +101,7 @@ class TestEncDecCTCModel:
         asr_model.preprocessor.featurizer.pad_to = 0
 
         input_signal = torch.randn(size=(4, 512))
-        length = torch.randint(low=161, high=500, size=[4])
+        length = torch.randint(low=321, high=500, size=[4])
 
         with torch.no_grad():
             # batch size 1
@@ -189,8 +190,8 @@ class TestEncDecCTCModel:
             assert isinstance(new_model.tokenizer, tokenizers.AggregateTokenizer)
 
             # should be double
-            assert new_model.tokenizer.tokenizer.vocab_size == 254
-            assert len(new_model.tokenizer.tokenizer.get_vocab()) == 254
+            assert new_model.tokenizer.tokenizer.vocab_size == 264
+            assert len(new_model.tokenizer.tokenizer.get_vocab()) == 264
 
     @pytest.mark.with_downloads()
     @pytest.mark.unit

@@ -1,4 +1,5 @@
-# Copyright (c) 2020-2025, NVIDIA CORPORATION.
+# SPDX-FileCopyrightText: Copyright (c) 2020-2025, NVIDIA CORPORATION & AFFILIATES.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,10 +19,12 @@ CUDA_VISIBLE_DEVICES="" NEMO_NUMBA_MINVER=0.53 coverage run -a --data-file=/work
     --ignore=tests/collections/llm \
     --ignore=tests/collections/multimodal \
     --ignore=tests/collections/nlp \
+    --ignore=tests/collections/speechlm2 \
     --ignore=tests/collections/tts \
     --ignore=tests/core \
     --ignore=tests/core_ptl \
     --ignore=tests/hydra \
     --ignore=tests/lightning \
     --ignore=tests/export \
-    --ignore=tests/deploy
+    --ignore=tests/deploy \
+    --ignore=tests/functional_tests

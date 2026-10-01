@@ -1,4 +1,5 @@
-# Copyright (c) 2022, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2022, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,10 +22,12 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 
-from nemo.collections.asr.parts.k2.classes import GraphIntersectDenseConfig
-from nemo.collections.asr.parts.submodules.ngram_lm import DEFAULT_TOKEN_OFFSET
+from nemo.collections.asr.parts.context_biasing import BoostingTreeModelConfig, GPUBoostingTreeModel
+from nemo.collections.asr.parts.submodules.ctc_batched_beam_decoding import BatchedBeamCTCComputer
+from nemo.collections.asr.parts.submodules.ngram_lm import DEFAULT_TOKEN_OFFSET, NGramGPULanguageModel
 from nemo.collections.asr.parts.submodules.wfst_decoder import RivaDecoderConfig, WfstNbestHypothesis
 from nemo.collections.asr.parts.utils import rnnt_utils
+from nemo.collections.common.parts.optional_cuda_graphs import WithOptionalCudaGraphs
 from nemo.collections.common.tokenizers.tokenizer_spec import TokenizerSpec
 from nemo.core.classes import Typing, typecheck
 from nemo.core.neural_types import HypothesisType, LengthsType, LogprobsType, NeuralType
@@ -204,7 +207,7 @@ class AbstractBeamCTCInfer(Typing):
 
 
 class BeamCTCInfer(AbstractBeamCTCInfer):
-    """A greedy CTC decoder.
+    """A beam CTC decoder.
 
     Provides a common abstraction for sample level and batch level greedy decoding.
 
@@ -227,9 +230,9 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
         return_best_hypothesis: bool = True,
         preserve_alignments: bool = False,
         compute_timestamps: bool = False,
-        beam_alpha: float = 1.0,
+        ngram_lm_alpha: float = 0.3,
         beam_beta: float = 0.0,
-        kenlm_path: str = None,
+        ngram_lm_model: str = None,
         flashlight_cfg: Optional['FlashlightConfig'] = None,
         pyctcdecode_cfg: Optional['PyCTCDecodeConfig'] = None,
     ):
@@ -260,11 +263,11 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
         # Log the beam search algorithm
         logging.info(f"Beam search algorithm: {search_type}")
 
-        self.beam_alpha = beam_alpha
+        self.ngram_lm_alpha = ngram_lm_alpha
         self.beam_beta = beam_beta
 
         # Default beam search args
-        self.kenlm_path = kenlm_path
+        self.ngram_lm_model = ngram_lm_model
 
         # PyCTCDecode params
         if pyctcdecode_cfg is None:
@@ -349,9 +352,9 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
 
         if self.default_beam_scorer is None:
             # Check for filepath
-            if self.kenlm_path is None or not os.path.exists(self.kenlm_path):
+            if self.ngram_lm_model is None or not os.path.exists(self.ngram_lm_model):
                 raise FileNotFoundError(
-                    f"KenLM binary file not found at : {self.kenlm_path}. "
+                    f"KenLM binary file not found at : {self.ngram_lm_model}. "
                     f"Please set a valid path in the decoding config."
                 )
 
@@ -367,9 +370,9 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
 
             self.default_beam_scorer = BeamSearchDecoderWithLM(
                 vocab=vocab,
-                lm_path=self.kenlm_path,
+                lm_path=self.ngram_lm_model,
                 beam_width=self.beam_size,
-                alpha=self.beam_alpha,
+                alpha=self.ngram_lm_alpha,
                 beta=self.beam_beta,
                 num_cpus=max(1, os.cpu_count()),
                 input_tensor=False,
@@ -451,7 +454,7 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
 
         if self.pyctcdecode_beam_scorer is None:
             self.pyctcdecode_beam_scorer = pyctcdecode.build_ctcdecoder(
-                labels=self.vocab, kenlm_model_path=self.kenlm_path, alpha=self.beam_alpha, beta=self.beam_beta
+                labels=self.vocab, kenlm_model_path=self.ngram_lm_model, alpha=self.ngram_lm_alpha, beta=self.beam_beta
             )  # type: pyctcdecode.BeamSearchDecoderCTC
 
         x = x.to('cpu').numpy()
@@ -533,9 +536,9 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
 
         if self.flashlight_beam_scorer is None:
             # Check for filepath
-            if self.kenlm_path is None or not os.path.exists(self.kenlm_path):
+            if self.ngram_lm_model is None or not os.path.exists(self.ngram_lm_model):
                 raise FileNotFoundError(
-                    f"KenLM binary file not found at : {self.kenlm_path}. "
+                    f"KenLM binary file not found at : {self.ngram_lm_model}. "
                     "Please set a valid path in the decoding config."
                 )
 
@@ -550,7 +553,7 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
             from nemo.collections.asr.modules.flashlight_decoder import FlashLightKenLMBeamSearchDecoder
 
             self.flashlight_beam_scorer = FlashLightKenLMBeamSearchDecoder(
-                lm_path=self.kenlm_path,
+                lm_path=self.ngram_lm_model,
                 vocabulary=self.vocab,
                 tokenizer=self.tokenizer,
                 lexicon_path=self.flashlight_cfg.lexicon_path,
@@ -558,7 +561,7 @@ class BeamCTCInfer(AbstractBeamCTCInfer):
                 beam_size=self.beam_size,
                 beam_size_token=self.flashlight_cfg.beam_size_token,
                 beam_threshold=self.flashlight_cfg.beam_threshold,
-                lm_weight=self.beam_alpha,
+                lm_weight=self.ngram_lm_alpha,
                 word_score=self.beam_beta,
                 unk_weight=self.flashlight_cfg.unk_weight,
                 sil_weight=self.flashlight_cfg.sil_weight,
@@ -621,7 +624,7 @@ class WfstCTCInfer(AbstractBeamCTCInfer):
         self,
         blank_id: int,
         beam_size: int,
-        search_type: str = "riva",  # 'riva', 'k2'
+        search_type: str = "riva",
         return_best_hypothesis: bool = True,
         preserve_alignments: bool = False,
         compute_timestamps: bool = False,
@@ -633,7 +636,6 @@ class WfstCTCInfer(AbstractBeamCTCInfer):
         arpa_lm_path: str = None,
         wfst_lm_path: str = None,
         riva_decoding_cfg: Optional['RivaDecoderConfig'] = None,
-        k2_decoding_cfg: Optional['GraphIntersectDenseConfig'] = None,
     ):
         super().__init__(blank_id=blank_id, beam_size=beam_size)
 
@@ -645,8 +647,6 @@ class WfstCTCInfer(AbstractBeamCTCInfer):
         self.decoding_algorithm = None
         if search_type in ("default", "riva"):
             self.decoding_algorithm = self._riva_decoding
-        elif search_type == "k2":
-            self.decoding_algorithm = self._k2_decoding
 
         # Log the WFST search_type
         logging.info(f"WFST beam search search_type: {search_type}")
@@ -672,11 +672,9 @@ class WfstCTCInfer(AbstractBeamCTCInfer):
         self.wfst_lm_path = wfst_lm_path
 
         self.riva_decoding_cfg = riva_decoding_cfg
-        self.k2_decoding_cfg = k2_decoding_cfg
 
         # Default beam search scorer functions
         self.riva_decoder = None
-        self.k2_decoder = None
 
     @typecheck()
     def forward(
@@ -707,7 +705,7 @@ class WfstCTCInfer(AbstractBeamCTCInfer):
         if self.decoding_algorithm is None:
             raise NotImplementedError(
                 f"The decoding search_type ({self.search_type}) supplied is not supported!\n"
-                f"Please use one of : (default, riva, k2)"
+                f"Please use one of : (default, riva)"
             )
 
         with torch.no_grad(), torch.inference_mode():
@@ -731,7 +729,7 @@ class WfstCTCInfer(AbstractBeamCTCInfer):
 
         return (packed_result,)
 
-    def _prepare_decoding_lm_wfst(self) -> Union[str, 'kaldifst.StdFst', 'k2.Fsa']:  # noqa: F821
+    def _prepare_decoding_lm_wfst(self) -> Union[str, 'kaldifst.StdFst']:  # noqa: F821
         """TBD"""
         arpa_lm_path_exists = self.arpa_lm_path is not None and os.path.exists(self.arpa_lm_path)
         wfst_lm_path_exists = self.wfst_lm_path is not None and os.path.exists(self.wfst_lm_path)
@@ -740,10 +738,6 @@ class WfstCTCInfer(AbstractBeamCTCInfer):
             if self.search_type == "riva" and not self.wfst_lm_path.endswith(".fst"):
                 raise ValueError(
                     f"Search type `riva` expects WFSTs in the `.fst` format. Provided: `{self.wfst_lm_path}`"
-                )
-            if self.search_type == "k2" and not self.wfst_lm_path.endswith(".pt"):
-                raise ValueError(
-                    f"Search type `k2` expects WFSTs in the `.pt` format. Provided: `{self.wfst_lm_path}`"
                 )
             if arpa_lm_path_exists:
                 logging.warning(
@@ -768,7 +762,7 @@ class WfstCTCInfer(AbstractBeamCTCInfer):
                 logging.warning("Consider providing a write-permitted `wfst_lm_path` for WFST LM buffering.")
                 write_tlg_path = None
             ctc_topology = "default"  # there is no way to indicate the need of other topologies
-            target = "kaldi" if self.search_type == "riva" else "k2"
+            target = "kaldi"
 
             from nemo.collections.asr.parts.utils.wfst_utils import mkgraph_ctc_ov
 
@@ -831,50 +825,136 @@ class WfstCTCInfer(AbstractBeamCTCInfer):
 
         return self.riva_decoder.decode(x.to(device=self.device), out_len.to(device=self.device))
 
-    @torch.no_grad()
-    def _k2_decoding(self, x: torch.Tensor, out_len: torch.Tensor) -> List['WfstNbestHypothesis']:
-        """
-        K2 WFST decoder Algorithm.
+
+class BeamBatchedCTCInfer(AbstractBeamCTCInfer, WithOptionalCudaGraphs):
+    """
+    A batched beam CTC decoder.
+
+    Args:
+        blank_index: int index of the blank token. Can be 0 or len(vocabulary).
+        beam_size: int size of the beam.
+        return_best_hypothesis:  When set to True (default), returns a single Hypothesis.
+            When set to False, returns a NBestHypotheses container, which contains a list of Hypothesis.
+        preserve_alignments: Bool flag which preserves the history of logprobs generated during
+            decoding (sample / batched). When set to true, the Hypothesis will contain
+            the non-null value for `logprobs` in it. Here, `logprobs` is a torch.Tensors.
+        compute_timestamps: A bool flag, which determines whether to compute the character/subword, or
+                word based timestamp mapping the output log-probabilities to discrite intervals of timestamps.
+                The timestamps will be available in the returned Hypothesis.timestep as a dictionary.
+        ngram_lm_alpha: float, the language model weight.
+        beam_beta: float, the word insertion weight.
+        beam_threshold: float, the beam pruning threshold.
+        ngram_lm_model: str, the path to the ngram model.
+        boosting_tree: BoostingTreeModelConfig, the boosting tree model config.
+        boosting_tree_alpha: float, the boosting tree alpha.
+        allow_cuda_graphs: bool, whether to allow cuda graphs for the beam search algorithm.
+    """
+
+    def __init__(
+        self,
+        blank_index: int,
+        beam_size: int,
+        return_best_hypothesis: bool = True,
+        preserve_alignments: bool = False,
+        compute_timestamps: bool = False,
+        ngram_lm_alpha: float = 1.0,
+        beam_beta: float = 0.0,
+        beam_threshold: float = 20.0,
+        ngram_lm_model: str = None,
+        boosting_tree: BoostingTreeModelConfig = None,
+        boosting_tree_alpha: float = 0.0,
+        allow_cuda_graphs: bool = True,
+        tokenizer: TokenizerSpec = None,
+    ):
+        super().__init__(blank_id=blank_index, beam_size=beam_size)
+
+        self.return_best_hypothesis = return_best_hypothesis
+        self.preserve_alignments = preserve_alignments
+        self.compute_timestamps = compute_timestamps
+        self.allow_cuda_graphs = allow_cuda_graphs
+
+        if self.compute_timestamps:
+            raise ValueError("`Compute timestamps` is not supported for batched beam search.")
+        if self.preserve_alignments:
+            raise ValueError("`Preserve alignments` is not supported for batched beam search.")
+
+        self.beam_beta = beam_beta
+        self.beam_threshold = beam_threshold
+
+        # load fusion models from paths (ngram_lm_model and boosting_tree_model)
+        fusion_models, fusion_models_alpha = [], []
+        if ngram_lm_model is not None:
+            assert blank_index != 0, "Blank should not be the first token in the vocabulary"
+            fusion_models.append(NGramGPULanguageModel.from_file(lm_path=ngram_lm_model, vocab_size=blank_index))
+            fusion_models_alpha.append(ngram_lm_alpha)
+        if boosting_tree and not BoostingTreeModelConfig.is_empty(boosting_tree):
+            assert blank_index != 0, "Blank should not be the first token in the vocabulary"
+            fusion_models.append(GPUBoostingTreeModel.from_config(boosting_tree, tokenizer=tokenizer))
+            fusion_models_alpha.append(boosting_tree_alpha)
+        if not fusion_models:
+            fusion_models = None
+            fusion_models_alpha = None
+
+        # # Default beam search args
+
+        self.search_algorithm = BatchedBeamCTCComputer(
+            blank_index=blank_index,
+            beam_size=beam_size,
+            return_best_hypothesis=return_best_hypothesis,
+            preserve_alignments=preserve_alignments,
+            compute_timestamps=compute_timestamps,
+            fusion_models=fusion_models,
+            fusion_models_alpha=fusion_models_alpha,
+            beam_beta=beam_beta,
+            beam_threshold=beam_threshold,
+            allow_cuda_graphs=allow_cuda_graphs,
+        )
+
+    def disable_cuda_graphs(self) -> bool:
+        """Disable CUDA graphs (e.g., for decoding in training)"""
+        if isinstance(self.search_algorithm, WithOptionalCudaGraphs):
+            return self.search_algorithm.disable_cuda_graphs()
+        return False
+
+    def maybe_enable_cuda_graphs(self) -> bool:
+        """Enable CUDA graphs (if allowed)"""
+        if isinstance(self.search_algorithm, WithOptionalCudaGraphs):
+            return self.search_algorithm.maybe_enable_cuda_graphs()
+        return False
+
+    @typecheck()
+    def forward(
+        self,
+        decoder_output: torch.Tensor,
+        decoder_lengths: torch.Tensor,
+    ) -> Tuple[List[Union[rnnt_utils.Hypothesis, rnnt_utils.NBestHypotheses]]]:
+        """Returns a list of hypotheses given an input batch of the encoder hidden embedding.
+        Output token is generated auto-repressively.
 
         Args:
-            x: Tensor of shape [B, T, V+1], where B is the batch size, T is the maximum sequence length,
-                and V is the vocabulary size. The tensor contains log-probabilities.
-            out_len: Tensor of shape [B], contains lengths of each sequence in the batch.
+            decoder_output: A tensor of size (batch, timesteps, features).
+            decoder_lengths: list of int representing the length of each sequence
+                output sequence.
 
         Returns:
-            A list of WfstNbestHypothesis objects, one for each sequence in the batch.
+            packed list containing batch number of sentences (Hypotheses).
         """
-        if self.k2_decoder is None:
-            lm_fst = self._prepare_decoding_lm_wfst()
-            if self.open_vocabulary_decoding and self._tokenword_disambig_id == -1:
-                if isinstance(lm_fst, str):
-                    from nemo.collections.asr.parts.k2.utils import load_graph
+        with torch.no_grad(), torch.inference_mode():
+            if decoder_output.ndim != 3:
+                raise ValueError(
+                    f"`decoder_output` must be a tensor of shape [B, T, V] (log probs, float). "
+                    f"Provided shape = {decoder_output.shape}"
+                )
 
-                    with torch.inference_mode(False):
-                        lm_fst = load_graph(lm_fst)
-                try:
-                    tokenword_disambig_id = lm_fst.aux_labels_sym.get("#1")
-                    self._tokenword_disambig_id = tokenword_disambig_id
-                except KeyError:
-                    raise ValueError(
-                        "Cannot determine `tokenword_disambig_id` "
-                        "which is required if `open_vocabulary_decoding` == True"
-                    )
+            batched_beam_hyps = self.search_algorithm(decoder_output, decoder_lengths)
 
-            from nemo.collections.asr.parts.k2.graph_decoders import K2WfstDecoder
+            batch_size = decoder_lengths.shape[0]
+            if self.return_best_hypothesis:
+                hyps = batched_beam_hyps.to_hyps_list(score_norm=False)[:batch_size]
+            else:
+                hyps = batched_beam_hyps.to_nbest_hyps_list(score_norm=False)[:batch_size]
 
-            self.k2_decoder = K2WfstDecoder(
-                lm_fst=lm_fst,
-                decoding_mode=self.decoding_mode,
-                beam_size=self.beam_width,
-                config=self.k2_decoding_cfg,
-                tokenword_disambig_id=self._tokenword_disambig_id,
-                lm_weight=self.lm_weight,
-                nbest_size=self.beam_size,
-                device=self.device,
-            )
-
-        return self.k2_decoder.decode(x.to(device=self.device), out_len.to(device=self.device))
+        return (hyps,)
 
 
 @dataclass
@@ -906,10 +986,16 @@ class BeamCTCInferConfig:
     preserve_alignments: bool = False
     compute_timestamps: bool = False
     return_best_hypothesis: bool = True
+    allow_cuda_graphs: bool = True
 
-    beam_alpha: float = 1.0
-    beam_beta: float = 0.0
-    kenlm_path: Optional[str] = None
+    beam_alpha: Optional[float] = None  # Deprecated
+    beam_beta: float = 1.0
+    beam_threshold: float = 20.0
+    kenlm_path: Optional[str] = None  # Deprecated, default should be None
+    ngram_lm_alpha: Optional[float] = 1.0
+    ngram_lm_model: Optional[str] = None
+    boosting_tree: BoostingTreeModelConfig = field(default_factory=BoostingTreeModelConfig)
+    boosting_tree_alpha: Optional[float] = 0.0
 
     flashlight_cfg: Optional[FlashlightConfig] = field(default_factory=lambda: FlashlightConfig())
     pyctcdecode_cfg: Optional[PyCTCDecodeConfig] = field(default_factory=lambda: PyCTCDecodeConfig())
@@ -918,7 +1004,7 @@ class BeamCTCInferConfig:
 @dataclass
 class WfstCTCInferConfig:
     beam_size: int
-    search_type: str = "riva"  # 'riva', 'k2'
+    search_type: str = "riva"
     return_best_hypothesis: bool = True
     preserve_alignments: bool = False
     compute_timestamps: bool = False
@@ -930,4 +1016,3 @@ class WfstCTCInferConfig:
     arpa_lm_path: Optional[str] = None
     wfst_lm_path: Optional[str] = None
     riva_decoding_cfg: Optional['RivaDecoderConfig'] = field(default_factory=lambda: RivaDecoderConfig())
-    k2_decoding_cfg: Optional['GraphIntersectDenseConfig'] = field(default_factory=lambda: GraphIntersectDenseConfig())

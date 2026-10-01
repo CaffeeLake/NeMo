@@ -1,4 +1,5 @@
-# Copyright (c) 2020, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2020, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -24,8 +25,8 @@ from nemo.collections.asr.modules.transformer.transformer_decoders import Transf
 from nemo.collections.asr.modules.transformer.transformer_encoders import TransformerEncoder
 from nemo.collections.asr.modules.transformer.transformer_generators import (
     BeamSearchSequenceGenerator,
+    BeamSearchSequenceGeneratorWithFusionModels,
     BeamSearchSequenceGeneratorWithLanguageModel,
-    BeamSearchSequenceGeneratorWithNGramLM,
     EnsembleBeamSearchSequenceGenerator,
     GreedySequenceGenerator,
     TopKSequenceGenerator,
@@ -44,7 +45,7 @@ __all__ = [
     "TransformerEncoder",
     "BeamSearchSequenceGenerator",
     "BeamSearchSequenceGeneratorWithLanguageModel",
-    "BeamSearchSequenceGeneratorWithNGramLM",
+    "BeamSearchSequenceGeneratorWithFusionModels",
     "EnsembleBeamSearchSequenceGenerator",
     "GreedySequenceGenerator",
     "TopKSequenceGenerator",

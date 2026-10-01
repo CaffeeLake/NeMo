@@ -1,4 +1,5 @@
-# Copyright (c) 2020, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2020, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,7 +18,7 @@ import operator
 import os.path
 import time
 from collections.abc import Iterator
-from typing import Callable, List, Optional, Union
+from typing import TYPE_CHECKING, Callable, List, Optional, Union
 
 import torch
 from omegaconf import DictConfig
@@ -25,6 +26,9 @@ from omegaconf import DictConfig
 from nemo.collections.asr.data.audio_to_text import ASRManifestProcessor, expand_sharded_filepaths
 from nemo.collections.common.parts.preprocessing import parsers
 from nemo.utils import logging, model_utils
+
+if TYPE_CHECKING:
+    from nemo.collections.common.tokenizers.tokenizer_spec import TokenizerSpec
 
 try:
     import nvidia.dali as dali
@@ -300,9 +304,7 @@ class _AudioTextDALIDataset(Iterator):
                     f"'clamp'."
                 )
 
-            self.log_zero_guard_value = (
-                params['log_zero_guard_value'] if 'log_zero_guard_value' in params else 2 ** -24
-            )
+            self.log_zero_guard_value = params['log_zero_guard_value'] if 'log_zero_guard_value' in params else 2**-24
             if isinstance(self.log_zero_guard_value, str):
                 if self.log_zero_guard_value == "tiny":
                     self.log_zero_guard_value = torch.finfo(torch.float32).tiny
@@ -346,8 +348,12 @@ class _AudioTextDALIDataset(Iterator):
 
             elif audio_tar_filepaths is not None and audio_tar_index_filepaths is not None:
                 audio_tar_filepaths = expand_sharded_filepaths(
-                    audio_tar_filepaths, shard_strategy=shard_strategy, world_size=world_size, global_rank=global_rank
+                    audio_tar_filepaths,
+                    shard_strategy=shard_strategy,
+                    world_size=world_size,
+                    global_rank=global_rank,
                 )
+
                 audio_tar_index_filepaths = expand_sharded_filepaths(
                     audio_tar_index_filepaths,
                     shard_strategy=shard_strategy,
@@ -374,7 +380,10 @@ class _AudioTextDALIDataset(Iterator):
                     pad_last_batch=True,
                 )
                 audio, _ = dali.fn.decoders.audio(
-                    tar_file, dtype=dali.types.FLOAT, downmix=True, sample_rate=float(self.sample_rate),
+                    tar_file,
+                    dtype=dali.types.FLOAT,
+                    downmix=True,
+                    sample_rate=float(self.sample_rate),
                 )
                 indices = dali.fn.get_property(tar_file, key="source_info")
                 indices = dali.fn.pad(indices)
@@ -446,7 +455,7 @@ class _AudioTextDALIDataset(Iterator):
                 )
 
                 # Normalization
-                spec = dali.fn.normalize(spec, axes=self.normalization_axes, epsilon=1e-5 ** 2, ddof=1)
+                spec = dali.fn.normalize(spec, axes=self.normalization_axes, epsilon=1e-5**2, ddof=1)
 
                 # Extracting the length of the spectrogram
                 spec_len = dali.fn.slice(dali.fn.shapes(spec), 1, 1, axes=(0,))
@@ -702,7 +711,7 @@ class AudioToBPEDALIDataset(_AudioTextDALIDataset):
     def __init__(
         self,
         manifest_filepath: str,
-        tokenizer: 'nemo.collections.common.tokenizers.TokenizerSpec',
+        tokenizer: 'TokenizerSpec',
         device: str,
         batch_size: int,
         sample_rate: int = 16000,

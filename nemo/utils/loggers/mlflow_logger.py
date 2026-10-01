@@ -1,4 +1,5 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2023, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,9 +19,12 @@ from typing import Any, Dict, Optional
 
 @dataclass
 class MLFlowParams:
+    """ML Flow Configuration Dataclass."""
+
     # name of experiment, if none, defaults to the globally set experiment name
     experiment_name: Optional[str] = None
-    # no run_name because it's set by version
+    run_name: Optional[str] = None
+    # if no run_name is set, it's set by version
     # local or remote tracking seerver. If tracking_uri is not set, it defaults to save_dir
     tracking_uri: Optional[str] = None
     tags: Optional[Dict[str, Any]] = None

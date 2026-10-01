@@ -79,7 +79,7 @@ For example, to load a SSL checkpoint for ASR down-stream task using ``EncDecRNN
   # discard ssl model
   del ssl model
 
-Refer to `SSL configs <./configs.html>`__ to do this automatically via config files. 
+Refer to :doc:`SSL configs <./configs>` to do this automatically via config files. 
 
 
 Fine-tuning on Downstream Datasets
@@ -91,7 +91,7 @@ Most of these tutorials explain how to fine-tune on some dataset as a demonstrat
 Inference Execution Flow Diagram
 --------------------------------
 
-When preparing your own inference scripts after downstream fine-tuning, please follow the execution flow diagram order for correct inference, found at the `examples directory for ASR collection <https://github.com/NVIDIA/NeMo/blob/stable/examples/asr/README.md>`_.
+When preparing your own inference scripts after downstream fine-tuning, please follow the execution flow diagram order for correct inference, found at the `examples directory for ASR collection <https://github.com/NVIDIA-NeMo/Speech/blob/stable/examples/asr/README.md>`_.
 
 SSL Models
 -----------------------------------

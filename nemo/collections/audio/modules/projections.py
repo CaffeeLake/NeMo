@@ -1,4 +1,5 @@
-# Copyright (c) 2020, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2020, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -67,6 +68,9 @@ class MixtureConsistencyProjection(NeuralModule):
         Returns:
             Source estimates consistent with the mixture, shape (B, M, F, N)
         """
+        if mixture.size(-3) != 1:
+            raise ValueError(f'Mixture must have a single channel, got shape {mixture.shape}')
+
         # number of sources
         M = estimate.size(-3)
         # estimated mixture based on the estimated sources

@@ -1,4 +1,5 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2023, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -56,15 +57,6 @@ def conformer_encoder_config() -> Dict:
     }
 
 
-def squeezeformer_encoder_config() -> Dict:
-    return {
-        '_target_': 'nemo.collections.asr.modules.SqueezeformerEncoder',
-        'feat_in': 64,
-        'n_layers': 8,
-        'd_model': 4,
-    }
-
-
 class TestInterCTCLoss:
     @pytest.mark.unit
     @pytest.mark.parametrize(
@@ -73,7 +65,7 @@ class TestInterCTCLoss:
     )
     @pytest.mark.parametrize(
         "encoder_config",
-        [jasper_encoder_config(num_layers=8), conformer_encoder_config(), squeezeformer_encoder_config()],
+        [jasper_encoder_config(num_layers=8), conformer_encoder_config()],
     )
     @pytest.mark.parametrize(
         "apply_at_layers,loss_weights",
@@ -172,13 +164,6 @@ class TestInterCTCLoss:
                     'aux_ctc': DictConfig(aux_ctc_config),
                 }
             )
-            # to avoid adding additional tests, we will always disable eval loss
-            # when encoder is Squeezeformer - there is nothing specific to
-            # particular encoder here, just picking a random one to test disabled
-            # loss use-case.
-            if encoder_config['_target_'] == 'nemo.collections.asr.modules.SqueezeformerEncoder':
-                model_config['compute_eval_loss'] = False
-
         model_config.update(
             {
                 'interctc': {'loss_weights': loss_weights, 'apply_at_layers': apply_at_layers},
@@ -203,7 +188,7 @@ class TestInterCTCLoss:
         # processed signal directly initially to remove the chance of
         # this edge-case
         input_signal = torch.randn(size=(1, 512))
-        input_length = torch.randint(low=161, high=500, size=[1])
+        input_length = torch.randint(low=321, high=500, size=[1])
         target = torch.randint(size=(1, input_length[0]), low=0, high=28)
         target_length = torch.tensor([input_length[0]])
 
@@ -235,9 +220,8 @@ class TestInterCTCLoss:
                 if model_class is EncDecCTCModel:
                     assert output[0].shape == logprobs.shape
 
-            ## Explicitly pass acclerator as cpu, since deafult val in PTL >= 2.0 is auto and it picks cuda
-            ## which further causes an error in all reduce at: https://github.com/NVIDIA/NeMo/blob/v1.18.1/nemo/collections/asr/modules/conv_asr.py#L209
-            ## and in https://github.com/NVIDIA/NeMo/blob/v1.18.1/nemo/collections/asr/modules/squeezeformer_encoder.py#L392 where device is CPU
+            # Explicitly pass accelerator as cpu, since default val in PTL >= 2.0 is auto and it picks cuda
+            # which further causes an error in all reduce at: https://github.com/NVIDIA-NeMo/Speech/blob/v1.18.1/nemo/collections/asr/modules/conv_asr.py#L209
             trainer = pl.Trainer(max_epochs=1, accelerator='cpu')
             trainer.fit(
                 asr_model,

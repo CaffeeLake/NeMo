@@ -1,4 +1,5 @@
-# Copyright (c) 2020, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2020, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -201,7 +202,7 @@ class AudioText(_Collection):
         logging.info("Dataset loaded with %d files totalling %.2f hours", len(data), total_duration / 3600)
         logging.info("%d files were filtered totalling %.2f hours", num_filtered, duration_filtered / 3600)
         if not all_has_duration:
-            logging.info(f"Not all audios have duration information, the total number of hours is inaccurate.")
+            logging.info("Not all audios have duration information, the total number of hours is inaccurate.")
         super().__init__(data)
 
 
@@ -311,135 +312,6 @@ class VideoText(_Collection):
         logging.info("%d files were filtered totalling %.2f hours", num_filtered, duration_filtered / 3600)
 
         super().__init__(data)
-
-
-class InstructionTuningAudioText(_Collection):
-    """`AudioText` collector from asr structured json files."""
-
-    OUTPUT_TYPE = collections.namedtuple(
-        typename='InstructionTuningText',
-        field_names=(
-            'id context context_type context_duration question '
-            'question_type answer answer_type answer_duration speaker'
-        ),
-    )
-
-    def __init__(
-        self,
-        manifests_files: Union[str, List[str]],
-        min_duration: Optional[float] = None,
-        max_duration: Optional[float] = None,
-        max_seq_length: Optional[float] = None,
-        max_number: Optional[int] = None,
-        do_sort_by_duration: bool = False,
-        index_by_file_id: bool = False,
-        decoder_only_model: bool = False,
-        use_phoneme_tokenizer: bool = False,
-    ):
-        """Parse lists of audio files, durations and transcripts texts.
-        Args:
-            manifests_files: Either single string file or list of such -
-                manifests to yield items from.
-            *args: Args to pass to `AudioText` constructor.
-            **kwargs: Kwargs to pass to `AudioText` constructor.
-        """
-
-        output_type = self.OUTPUT_TYPE
-        self.use_phoneme_tokenizer = use_phoneme_tokenizer
-        data, duration_filtered, num_filtered, total_duration = [], 0.0, 0, 0.0
-        if index_by_file_id:
-            self.mapping = {}
-
-        for item in manifest.item_iter(manifests_files):
-
-            id = item['id']
-            context = item['context']
-            context_duration = item['context_duration']
-            context_type = item['context_type']
-            question = item['question']
-            question_type = item['question_type']
-            speaker = item['speaker']
-            answer = item['answer']
-            answer_duration = item['answer_duration']
-            answer_type = item['answer_type']
-            task = item['task']
-
-            task = 'tts' if task is None else task
-            duration = answer_duration if task == 'tts' else context_duration
-            if min_duration is not None and duration < min_duration:
-                duration_filtered += duration
-                num_filtered += 1
-                continue
-
-            if max_duration is not None and duration > max_duration:
-                duration_filtered += duration
-                num_filtered += 1
-                continue
-
-            # Check segment length
-            approx_context_len = min(self._get_len(context_type, context, context_duration) * 0.3, 400)
-            approx_question_len = self._get_len(question_type, question, None)
-            approx_answer_len = self._get_len(answer_type, answer, answer_duration)
-
-            if (
-                decoder_only_model and approx_context_len + approx_question_len + approx_answer_len >= max_seq_length
-            ) or (approx_context_len + approx_question_len >= max_seq_length or approx_answer_len >= max_seq_length):
-                duration_filtered += duration
-                num_filtered += 1
-                continue
-
-            total_duration += duration
-            data.append(
-                output_type(
-                    id,
-                    context,
-                    context_type,
-                    context_duration,
-                    question,
-                    question_type,
-                    answer,
-                    answer_type,
-                    answer_duration,
-                    speaker,
-                )
-            )
-
-            if index_by_file_id:
-                file_id, _ = os.path.splitext(os.path.basename(context))
-                if ".context" in file_id:
-                    file_id = file_id[:-8]
-                if file_id not in self.mapping:
-                    self.mapping[file_id] = []
-                self.mapping[file_id].append(len(data) - 1)
-
-            # Max number of entities filter.
-            if len(data) == max_number:
-                break
-
-        if do_sort_by_duration:
-            if index_by_file_id:
-                logging.warning("Tried to sort dataset by duration, but cannot since index_by_file_id is set.")
-            else:
-                data.sort(key=lambda entity: entity.duration)
-
-        logging.info("Dataset loaded with %d files totalling %.2f hours", len(data), total_duration / 3600)
-        logging.info("%d files were filtered totalling %.2f hours", num_filtered, duration_filtered / 3600)
-
-        super().__init__(data)
-
-    def _get_len(self, field_type, data, duration_data):
-        if field_type == "SPEECH":
-            return duration_data * 76  # TODO: add explanation for the hardcoded value.
-        elif field_type == "TEXT":
-            if self.use_phoneme_tokenizer:
-                # Approx len is number of characters
-                return len(data)
-            else:
-                return len(data.split(' ')) + 3  # # TODO: add explanation for the hardcoded value.
-        elif field_type == "TOKENS":
-            return len(data) + 3
-        else:
-            raise ValueError(f"Unknown field type {field_type}.")
 
 
 class ASRAudioText(AudioText):
@@ -1488,6 +1360,7 @@ class EndtoEndDiarizationSpeechLabel(EndtoEndDiarizationLabel):
         manifests_files: Union[str, List[str]],
         round_digits: int = 2,
         *args,
+        validate_manifest_paths: bool = True,
         **kwargs,
     ):
         """
@@ -1501,6 +1374,8 @@ class EndtoEndDiarizationSpeechLabel(EndtoEndDiarizationLabel):
             round_digit (int):
                 Number of digits to be rounded.
             *args: Args to pass to `SpeechLabel` constructor.
+            validate_manifest_paths (bool):
+                If True, verify that each unique audio and RTTM path exists while loading the manifest.
             **kwargs: Kwargs to pass to `SpeechLabel` constructor.
         """
         self.round_digits = round_digits
@@ -1511,8 +1386,22 @@ class EndtoEndDiarizationSpeechLabel(EndtoEndDiarizationLabel):
             [],
             [],
         )
+        checked_paths = set()
 
         for item in manifest.item_iter(manifests_files, parse_func=self.__parse_item_rttm):
+            if validate_manifest_paths:
+                for paths, path_type in (
+                    (item['audio_file'], 'Audio'),
+                    (item['rttm_file'], 'RTTM'),
+                ):
+                    paths = paths if isinstance(paths, (list, tuple)) else (paths,)
+                    for path in paths:
+                        if not isinstance(path, str) or path in checked_paths:
+                            continue
+                        if not os.path.exists(path):
+                            raise FileNotFoundError(f"{path_type} file not found: {path}")
+                        checked_paths.add(path)
+
             # Training mode
             audio_files.append(item['audio_file'])
             uniq_ids.append(item['uniq_id'])
@@ -1551,13 +1440,12 @@ class EndtoEndDiarizationSpeechLabel(EndtoEndDiarizationLabel):
 
         # Audio file handling depending on the types
         if isinstance(item['audio_file'], list):
+            audio_file_list = []
             for single_audio_file in item['audio_file']:
                 audio_file_list.append(get_full_path(audio_file=single_audio_file, manifest_file=manifest_file))
             item['audio_file'] = audio_file_list
         elif isinstance(item['audio_file'], str):
             item['audio_file'] = get_full_path(audio_file=item['audio_file'], manifest_file=manifest_file)
-            if not os.path.exists(item['audio_file']):
-                raise FileNotFoundError(f"Audio file not found: {item['audio_file']}")
         else:
             raise ValueError(
                 f"Manifest file has invalid json line "
@@ -1574,11 +1462,9 @@ class EndtoEndDiarizationSpeechLabel(EndtoEndDiarizationLabel):
         else:
             item['rttm_file'] = None
 
-        # If item['rttm_file'] is not None and the RTTM file exists, get the full path
+        # If item['rttm_file'] is not None, get the full path.
         if item['rttm_file'] is not None:
             item['rttm_file'] = get_full_path(audio_file=item['rttm_file'], manifest_file=manifest_file)
-            if not os.path.exists(item['rttm_file']):
-                raise FileNotFoundError(f"RTTM file not found: {item['rttm_file']}")
 
         # Handling `uniq_id` string
         if 'uniq_id' not in item:

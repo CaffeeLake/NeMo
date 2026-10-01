@@ -1,3 +1,4 @@
+:orphan:
 
 Example With MCV
 ================
@@ -340,7 +341,7 @@ We used the following script from NeMo toolkit to create `Sentencepiece <https:/
       --spe_max_sentencepiece_length=2 \
       --log
 
-Most of the arguments are similar to those explained in the `ASR with Subword Tokenization tutorial <https://github.com/NVIDIA/NeMo/tree/stable/tutorials/asr/ASR_with_Subword_Tokenization.ipynb>`_.
+Most of the arguments are similar to those explained in the `ASR with Subword Tokenization tutorial <https://github.com/NVIDIA-NeMo/Speech/tree/stable/tutorials/asr/ASR_with_Subword_Tokenization.ipynb>`_.
 
 The resulting tokenizer is a folder like that:
 
@@ -435,8 +436,8 @@ The CTC model predicts output tokens for each timestep. The outputs are assumed 
 Training scripts and configs
 ############################
 
-To train a Conformer-CTC model, we use `speech_to_text_ctc_bpe.py <https://github.com/NVIDIA/NeMo/tree/stable/examples/asr/asr_ctc/speech_to_text_ctc_bpe.py>`_ with the default config `conformer_ctc_bpe.yaml <https://github.com/NVIDIA/NeMo/tree/stable/examples/asr/conf/conformer/conformer_ctc_bpe.yaml>`_.
-To train a Conformer-Transducer model, we use `speech_to_text_rnnt_bpe.py <https://github.com/NVIDIA/NeMo/tree/stable/examples/asr/asr_transducer/speech_to_text_rnnt_bpe.py>`_ with the default config `conformer_transducer_bpe.yaml <https://github.com/NVIDIA/NeMo/tree/stable/examples/asr/conf/conformer/conformer_transducer_bpe.yaml>`_.
+To train a Conformer-CTC model, we use `speech_to_text_ctc_bpe.py <https://github.com/NVIDIA-NeMo/Speech/tree/stable/examples/asr/asr_ctc/speech_to_text_ctc_bpe.py>`_ with the default config `conformer_ctc_bpe.yaml <https://github.com/NVIDIA-NeMo/Speech/tree/stable/examples/asr/conf/conformer/conformer_ctc_bpe.yaml>`_.
+To train a Conformer-Transducer model, we use `speech_to_text_rnnt_bpe.py <https://github.com/NVIDIA-NeMo/Speech/tree/stable/examples/asr/asr_transducer/speech_to_text_rnnt_bpe.py>`_ with the default config `conformer_transducer_bpe.yaml <https://github.com/NVIDIA-NeMo/Speech/tree/stable/examples/asr/conf/conformer/conformer_transducer_bpe.yaml>`_.
 Any options of default config can be overwritten from command line.
 Usually we should provide the options related to the dataset and tokenizer.
 
@@ -531,7 +532,7 @@ Inference and evaluation
 Running the inference
 #####################
 
-To run the inference we need a pretrained model. This can be either a `.nemo` file that we get after the training is finished, or any published model from `NGC <https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models>`_.
+To run the inference we need a pretrained model. This can be either a `.nemo` file that we get after the training is finished, or any published ASR model from `HF <https://huggingface.co/nvidia>`__ or `NGC <https://catalog.ngc.nvidia.com/?filters=application%7CAutomatic+Speech+Recognition%7Cuscs_automatic_speech_recognition&query=nemo>`__.
 We run the inference using the following script:
 
 .. code-block:: bash

@@ -1,7 +1,8 @@
 # ! /usr/bin/python
 # -*- coding: utf-8 -*-
 
-# Copyright (c) 2020, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2020, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,13 +18,10 @@
 
 """Setup for pip package."""
 
-import codecs
 import importlib.util
-import os
 import subprocess
 from distutils import cmd as distutils_cmd
 from distutils import log as distutils_log
-from itertools import chain
 
 import setuptools
 
@@ -47,87 +45,6 @@ __version__ = package_info.__version__
 with open("README.md", "r", encoding='utf-8') as fh:
     long_description = fh.read()
     long_description_content_type = "text/markdown"
-
-
-###############################################################################
-#                             Dependency Loading                              #
-# %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% #
-
-
-def req_file(filename, folder="requirements"):
-    files = [filename] if not isinstance(filename, list) else filename
-    ans = []
-    for file in files:
-        with open(os.path.join(folder, file), encoding='utf-8') as f:
-            ans.extend(list(map(str.strip, f.readlines())))
-    return ans
-
-
-install_requires = req_file("requirements.txt")
-
-extras_require = {
-    # User packages
-    'test': req_file("requirements_test.txt"),
-    # Lightning Collections Packages
-    'core': req_file(["requirements_lightning.txt", "requirements_automodel.txt"]),
-    'common': req_file('requirements_common.txt'),
-    # domain packages
-    'asr': req_file("requirements_asr.txt"),
-    'ctc_segmentation': req_file("requirements.txt", folder="tools/ctc_segmentation"),
-    'nlp': req_file("requirements_nlp.txt"),
-    'tts': req_file("requirements_tts.txt"),
-    'slu': req_file("requirements_slu.txt"),
-    'multimodal': req_file("requirements_multimodal.txt"),
-    'audio': req_file("requirements_audio.txt"),
-    'deploy': req_file("requirements_deploy.txt"),
-    'eval': req_file("requirements_eval.txt"),
-}
-
-
-extras_require['all'] = list(chain(*extras_require.values()))
-
-# Add lightning requirements as needed
-extras_require['common'] = list(chain(extras_require['common'], extras_require['core']))
-extras_require['test'] = list(
-    chain(
-        extras_require['tts'],
-        extras_require['core'],
-        extras_require['common'],
-    )
-)
-extras_require['asr'] = list(
-    chain(extras_require['asr'], extras_require['core'], extras_require['common'], extras_require['ctc_segmentation'])
-)
-extras_require['nlp'] = list(
-    chain(
-        extras_require['nlp'],
-        extras_require['core'],
-        extras_require['common'],
-        extras_require['eval'],
-    )
-)
-extras_require['llm'] = extras_require['nlp']
-extras_require['tts'] = list(
-    chain(
-        extras_require['tts'],
-        extras_require['core'],
-        extras_require['common'],
-    )
-)
-extras_require['multimodal'] = list(
-    chain(
-        extras_require['multimodal'],
-        extras_require['nlp'],
-        extras_require['core'],
-        extras_require['common'],
-    )
-)
-extras_require['audio'] = list(chain(extras_require['audio'], extras_require['core'], extras_require['common']))
-
-# TTS has extra dependencies
-extras_require['tts'] = list(chain(extras_require['tts'], extras_require['asr']))
-
-extras_require['slu'] = list(chain(extras_require['slu'], extras_require['asr']))
 
 
 ###############################################################################
@@ -257,12 +174,6 @@ setuptools.setup(
     ],
     packages=setuptools.find_packages(),
     python_requires='>=3.10',
-    install_requires=install_requires,
-    # List additional groups of dependencies here (e.g. development
-    # dependencies). You can install these using the following syntax,
-    # $ pip install -e ".[all]"
-    # $ pip install nemo_toolkit[all]
-    extras_require=extras_require,
     # Add in any packaged data.
     include_package_data=True,
     exclude=['tools', 'tests'],
@@ -272,9 +183,4 @@ setuptools.setup(
     keywords=__keywords__,
     # Custom commands.
     cmdclass={'style': StyleCommand},
-    entry_points={
-        "nemo_run.cli": [
-            "llm = nemo.collections.llm",
-        ],
-    },
 )

@@ -1,4 +1,5 @@
-# Copyright (c) 2020, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2020, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -75,6 +76,9 @@ class AppState(metaclass=Singleton):
         self._context_parallel_size = None
         self._init_mpi_proc_gruop = False
         self._nccl_communicator_config_path = None
+        self._use_sharp = False
+        self._create_all_gather_group = False
+        self._use_gloo_process_groups = True
 
         self._random_seed = None
 
@@ -571,6 +575,54 @@ class AppState(metaclass=Singleton):
             use_fp8:  Use of FP8.
         """
         self._use_fp8 = use_fp8
+
+    @property
+    def use_sharp(self):
+        """Property returns whether to use SHARP for all-reduce operations.
+        Returns:
+            Whether to use SHARP.
+        """
+        return self._use_sharp
+
+    @use_sharp.setter
+    def use_sharp(self, use_sharp):
+        """Property sets whether to use SHARP for all-reduce operations.
+        Args:
+            use_sharp (bool): Whether to use SHARP.
+        """
+        self._use_sharp = use_sharp
+
+    @property
+    def create_all_gather_group(self):
+        """Property returns whether to create a separate all-gather process group.
+        Returns:
+            Whether to create a separate all-gather process group.
+        """
+        return self._create_all_gather_group
+
+    @create_all_gather_group.setter
+    def create_all_gather_group(self, create_all_gather_group):
+        """Property sets whether to create a separate all-gather process group.
+        Args:
+            create_all_gather_group (bool): Whether to create a separate all-gather process group.
+        """
+        self._create_all_gather_group = create_all_gather_group
+
+    @property
+    def use_gloo_process_groups(self):
+        """Property returns whether to use Gloo process groups.
+        Returns:
+            Whether to use Gloo process groups.
+        """
+        return self._use_gloo_process_groups
+
+    @use_gloo_process_groups.setter
+    def use_gloo_process_groups(self, use_gloo_process_groups):
+        """Property sets whether to use Gloo process groups.
+        Args:
+            use_gloo_process_groups (bool): Whether to use Gloo process groups.
+        """
+        self._use_gloo_process_groups = use_gloo_process_groups
 
     @property
     def context_parallel_size(self):

@@ -1,4 +1,5 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2023, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -375,3 +376,13 @@ def fast_conformer_hybrid_model():
 @pytest.fixture(scope='session')
 def canary_1b_flash():
     return ASRModel.restore_from("/home/TestData/asr/canary/models/canary-1b-flash_HF_20250318.nemo")
+
+
+@pytest.fixture(scope='session')
+def canary_1b_v2():
+    return ASRModel.restore_from("/home/TestData/asr/canary/models/canary-1b-v2_20250809.nemo")
+
+
+@pytest.fixture(scope='session')
+def hybrid_rnnt_ctc_bpe_model_with_prompt():
+    return ASRModel.restore_from("/home/TestData/asr/hybrid_rnnt_ctc_bpe_model_with_prompt.nemo")

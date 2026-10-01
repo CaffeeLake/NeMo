@@ -1,4 +1,5 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2023, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -58,7 +59,7 @@ import contextlib
 import json
 import os
 import time
-from dataclasses import dataclass, is_dataclass
+from dataclasses import dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -124,10 +125,10 @@ class InferenceConfig:
     compute_langs: bool = False
 
     # Decoding strategy for CTC models
-    ctc_decoding: CTCDecodingConfig = CTCDecodingConfig()
+    ctc_decoding: CTCDecodingConfig = field(default_factory=CTCDecodingConfig)
 
     # Decoding strategy for RNNT models
-    rnnt_decoding: RNNTDecodingConfig = RNNTDecodingConfig(fused_batch_size=-1)
+    rnnt_decoding: RNNTDecodingConfig = field(default_factory=lambda: RNNTDecodingConfig(fused_batch_size=-1))
 
     # VAD model type
     vad_type: str = "frame"  # which type of VAD to use, choices=[`frame`, `segment`]

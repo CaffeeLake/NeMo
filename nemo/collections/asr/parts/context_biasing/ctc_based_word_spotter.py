@@ -1,4 +1,5 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -57,9 +58,9 @@ class WSHyp:
 
 
 def beam_pruning(next_tokens: List[Token], beam_threshold: float) -> List[Token]:
-    """ 
+    """
     Prun all tokens whose score is worse than best_token.score - beam_threshold
-    
+
     Args:
         next_tokens: list of input tokens
         beam_threshold: beam threshold
@@ -77,10 +78,10 @@ def beam_pruning(next_tokens: List[Token], beam_threshold: float) -> List[Token]
 def state_pruning(next_tokens: List[Token]) -> List[Token]:
     """
     If there are several tokens on the same state, then leave only the best of them according to score
-    
+
     Args:
         next_tokens: list of input tokens
-    
+
     Returns:
         list of pruned tokens
     """
@@ -127,8 +128,8 @@ def find_best_hyps(spotted_words: List[WSHyp], intersection_threshold: int = 10)
         # check hyp intersection with all the elements in hyp_intervals_dict
         for h_interval_key in hyp_intervals_dict:
             # get left and right interval values
-            l, r = int(h_interval_key.split("_")[0]), int(h_interval_key.split("_")[1])
-            current_dict_interval = set(range(l, r + 1))
+            left, right = int(h_interval_key.split("_")[0]), int(h_interval_key.split("_")[1])
+            current_dict_interval = set(range(left, right + 1))
             intersection_part = 100 / len(current_dict_interval) * len(hyp_interval & current_dict_interval)
             # in case of intersection:
             if intersection_part >= intersection_threshold:
@@ -149,7 +150,7 @@ def find_best_hyps(spotted_words: List[WSHyp], intersection_threshold: int = 10)
 def get_ctc_word_alignment(
     logprob: np.ndarray, asr_model, token_weight: float = 1.0, blank_idx: int = 0
 ) -> List[tuple]:
-    """ 
+    """
     Get word level alignment (with start and end frames) based on argmax ctc predictions.
     The word score is a sum of non-blank token logprobs with additional token_weight.
     token_weight is used to prevent false accepts during filtering word spotting hypotheses.
@@ -183,29 +184,29 @@ def get_ctc_word_alignment(
     begin_of_word = "▁"
     word_alignment = []
     word = ""
-    l, r, score = None, None, None
+    left, right, score = None, None, None
     for item in token_alignment:
         if not word:
             if word.startswith(begin_of_word):
                 word = item[0][1:]
             else:
                 word = item[0][:]
-            l = item[1]
-            r = item[1]
+            left = item[1]
+            right = item[1]
             score = item[2] + token_weight
         else:
             if item[0].startswith(begin_of_word):
-                word_alignment.append((word, l, r, score))
+                word_alignment.append((word, left, right, score))
                 word = item[0][1:]
-                l = item[1]
-                r = item[1]
+                left = item[1]
+                right = item[1]
                 score = item[2] + token_weight
             else:
                 word += item[0]
-                r = item[1]
+                right = item[1]
                 score += item[2] + token_weight
     if word:
-        word_alignment.append((word, l, r, score))
+        word_alignment.append((word, left, right, score))
 
     if len(word_alignment) == 1 and not word_alignment[0][0]:
         word_alignment = []
@@ -224,9 +225,9 @@ def filter_wb_hyps(best_hyp_list: List[WSHyp], word_alignment: List[tuple]) -> L
     Args:
         best_hyp_list: list of spotted hypotheses WSHyp
         word_alignment: world level ctc alignment with word scores
-    
+
     Returns:
-        filtered best_hyp_list 
+        filtered best_hyp_list
     """
 
     if not word_alignment:
@@ -279,8 +280,8 @@ def run_word_spotter(
     CTC-based Word Spotter for recognition of words from context biasing graph (paper link)
     The algorithm is based on the Token Passing Algorithm (TPA) and uses run, beam and state prunings.
     Blank and non-blank thresholds are used for preliminary hypotheses pruning.
-    The algorithm is implemented in log semiring. 
-    
+    The algorithm is implemented in log semiring.
+
     Args:
         logprobs: CTC logprobs for one file [Time, Vocab+blank]
         context_graph: Context-Biasing graph

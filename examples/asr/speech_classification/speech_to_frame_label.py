@@ -1,4 +1,5 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2023, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,6 +23,7 @@ python speech_to_frame_label.py \
     --config-path=<path to dir of configs e.g. "../conf/marblenet">
     --config-name=<name of config without .yaml e.g. "marblenet_3x2x64_20ms"> \
     model.train_ds.manifest_filepath="<path to train manifest>" \
+    model.train_ds.augmentor.noise.manifest_path="<path to noise manifest>" \
     model.validation_ds.manifest_filepath=["<path to val manifest>","<path to test manifest>"] \
     trainer.devices=2 \
     trainer.accelerator="gpu" \

@@ -1,4 +1,5 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2023, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,11 +19,11 @@ from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
 import numpy as np
-import texterrors
 import torch
+from kaldialign import align
 from omegaconf import open_dict
 
-from nemo.collections.asr.models import ASRModel, EncDecRNNTModel
+from nemo.collections.asr.models import ASRModel
 from nemo.collections.asr.parts.utils.confidence_metrics import (
     auc_nt,
     auc_pr,
@@ -44,11 +45,12 @@ def get_correct_marks(r: Union[List[int], List[str]], h: Union[List[int], List[s
 
     This method considers only insertions and substitutions as incorrect marks.
     """
-    return [
-        a == b
-        for a, b in zip(*(texterrors.align_texts([str(rr) for rr in r], [str(hh) for hh in h], False)[:-1]))
-        if b != "<eps>"
-    ]
+    alignment = align(
+        [str(rr) for rr in r],
+        [str(hh) for hh in h],
+        "<eps>",
+    )
+    return [a == b for a, b in alignment if b != "<eps>"]
 
 
 def get_token_targets_with_confidence(hyp: Hypothesis) -> List[Tuple[str, float]]:
@@ -78,7 +80,6 @@ def run_confidence_benchmark(
     draw_plot = plot_dir is not None
     if isinstance(plot_dir, str):
         plot_dir = Path(plot_dir)
-    is_rnnt = isinstance(model, EncDecRNNTModel)
 
     # transcribe audio
     with torch.amp.autocast(model.device.type, enabled=use_amp):
@@ -86,8 +87,6 @@ def run_confidence_benchmark(
             transcriptions = model.transcribe(
                 audio=filepaths, batch_size=batch_size, return_hypotheses=True, num_workers=num_workers
             )
-    if is_rnnt:
-        transcriptions = transcriptions[0]
 
     levels = []
     if target_level != "word":

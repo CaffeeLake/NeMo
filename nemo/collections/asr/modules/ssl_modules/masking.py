@@ -1,4 +1,5 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,9 +14,9 @@
 # limitations under the License.
 
 
+import math
 from typing import Optional, Union
 
-import numpy as np
 import torch
 import torch.nn as nn
 
@@ -63,16 +64,16 @@ class RandomBlockMasking(NeuralModule):
     def input_types(self):
         """Returns definitions of module input types"""
         return {
-            "input_feats": NeuralType(('B', 'D', 'T'), AcousticEncodedRepresentation()),
-            "input_lengths": NeuralType(tuple('B'), LengthsType()),
+            "input_feats": NeuralType(("B", "D", "T"), AcousticEncodedRepresentation()),
+            "input_lengths": NeuralType(tuple("B"), LengthsType()),
         }
 
     @property
     def output_types(self):
         """Returns definitions of module output types"""
         return {
-            "maksed_feats": NeuralType(('B', 'D', 'T'), AcousticEncodedRepresentation()),
-            "masks": NeuralType(('B', 'D', 'T'), AcousticEncodedRepresentation()),
+            "maksed_feats": NeuralType(("B", "D", "T"), AcousticEncodedRepresentation()),
+            "masks": NeuralType(("B", "D", "T"), AcousticEncodedRepresentation()),
         }
 
     def forward(self, input_feats: torch.Tensor, input_lengths: torch.Tensor):
@@ -89,71 +90,75 @@ class RandomBlockMasking(NeuralModule):
         else:
             return self.forward_without_overlap(input_feats, input_lengths)
 
-    def forward_without_overlap(self, input_feats: torch.Tensor, input_lengths: torch.Tensor):
-        """
-        Args:
-            input_feats (Tensor): input sequence features, shape=(batch, features, time)
-            input_length (Tensor): length of each sequence in the batch, shape=(batch)
-        Returns:
-            masked_feats (Tensor): masked features, shape=(batch, features, time)
-            masks (Tensor): the generated masks, shape=(batch, features, time)
-        """
-        batch_size = input_feats.size(0)
-        mask_value = self.mask_embedding.unsqueeze(-1)
-        masks = torch.zeros_like(input_feats)
-        maksed_feats = input_feats.clone()
-        for i in range(batch_size):
-            if self.block_size >= input_lengths[i] * self.max_mask_ratio:
-                # handle case where audio is too short
-                block_size = 8
-                num_patches = 1
-                patch_idx = [0]
-            else:
-                num_patches = torch.ceil(input_lengths[i] * self.mask_prob / self.block_size).int()
-                offset = torch.randint(0, self.block_size, (1,), device=input_feats.device)[0]
-                block_size = self.block_size
-                if (num_patches + 1) * self.block_size > input_lengths[i]:
-                    block_size = torch.div(input_lengths[i], (num_patches + 1), rounding_mode='trunc')
-                max_num_patches = torch.div(input_lengths[i], block_size, rounding_mode='trunc')
-                patch_idx = torch.randperm(max_num_patches - 1, device=input_feats.device)[:num_patches]
-            for j in range(num_patches):
-                start = patch_idx[j] * block_size + offset
-                end = start + block_size
-                masks[i, :, start:end] = 1.0
-                maksed_feats[i, :, start:end] = mask_value
-        return maksed_feats, masks
+    def forward_without_overlap(self, input_feats, input_lengths):
+        batch_size, _, max_time = input_feats.shape
 
-    def forward_with_overlap(self, input_feats: torch.Tensor, input_lengths: torch.Tensor):
-        """
-        Args:
-            input_feats (Tensor): input sequence features, shape=(batch, features, time)
-            input_length (Tensor): length of each sequence in the batch, shape=(batch)
-        Returns:
-            masked_feats (Tensor): masked features, shape=(batch, features, time)
-            masks (Tensor): the generated masks, shape=(batch, features, time)
-        """
-        batch_size = input_feats.size(0)
-        mask_value = self.mask_embedding.unsqueeze(-1)
-        masks = torch.zeros_like(input_feats)
-        maksed_feats = input_feats.clone()
-        for i in range(batch_size):
-            if self.block_size >= input_lengths[i] * self.max_mask_ratio:
-                # handle case where audio is too short
-                curr_block_size = 8
-                num_patches = 1
-                patch_idices = [0]
-            else:
-                curr_block_size = self.block_size
-                curr_len = input_lengths[i].detach().cpu().numpy()
-                num_patches = np.random.binomial(max(0, curr_len - self.block_size), self.mask_prob)
-                patch_idices = torch.randperm(max(0, curr_len - self.block_size), device=input_feats.device)
-                patch_idices = patch_idices[:num_patches]
-            for j in range(num_patches):
-                start = patch_idices[j]
-                end = min(start + curr_block_size, input_lengths[i])
-                masks[i, :, start:end] = 1.0
-                maksed_feats[i, :, start:end] = mask_value
-        return maksed_feats, masks
+        num_patches = torch.ceil(input_lengths * self.mask_prob / self.block_size).long()
+        block_sizes = torch.full_like(input_lengths, self.block_size)
+        needs_shrink = (num_patches + 1) * block_sizes > input_lengths
+        block_sizes = torch.where(
+            needs_shrink,
+            input_lengths // (num_patches + 1),
+            block_sizes,
+        ).clamp_min(1)
+
+        num_slots = (input_lengths // block_sizes - 1).clamp_min(0)
+        num_patches = torch.minimum(num_patches, num_slots)
+
+        slots = torch.arange(max_time, device=input_feats.device)
+        valid_slots = slots.unsqueeze(0) < num_slots.unsqueeze(1)
+        scores = torch.rand(batch_size, max_time, device=input_feats.device)
+        scores.masked_fill_(~valid_slots, float("-inf"))
+
+        max_patches = math.ceil(max_time * self.mask_prob / self.block_size)
+        selected_slots = scores.topk(max_patches, dim=1).indices
+        selected = torch.arange(max_patches, device=input_feats.device).unsqueeze(0) < num_patches.unsqueeze(1)
+
+        offsets = (torch.rand(batch_size, device=input_feats.device) * block_sizes).long()
+        starts = selected_slots * block_sizes.unsqueeze(1) + offsets.unsqueeze(1)
+        ends = starts + block_sizes.unsqueeze(1)
+        starts = torch.where(selected, starts, 0)
+        ends = torch.where(selected, ends, 0)
+        deltas = selected.int()
+
+        coverage_diff = torch.zeros(
+            batch_size,
+            max_time + 1,
+            dtype=torch.int32,
+            device=input_feats.device,
+        )
+        coverage_diff.scatter_add_(1, starts, deltas)
+        coverage_diff.scatter_add_(1, ends, -deltas)
+        time_mask = coverage_diff[:, :max_time].cumsum(dim=1) > 0
+        time_mask = time_mask.unsqueeze(1)
+
+        masked_feats = torch.where(
+            time_mask,
+            self.mask_embedding.view(1, -1, 1),
+            input_feats,
+        )
+        masks = time_mask.to(input_feats.dtype).expand_as(input_feats)
+        return masked_feats, masks
+
+    def forward_with_overlap(self, input_feats, input_lengths):
+        batch_size, _, max_time = input_feats.shape
+        positions = torch.arange(max_time, device=input_feats.device)
+
+        valid_starts = positions + self.block_size <= input_lengths.unsqueeze(1)
+        start_mask = (torch.rand(batch_size, max_time, device=input_feats.device) < self.mask_prob) & valid_starts
+        time_mask = torch.nn.functional.max_pool1d(
+            torch.nn.functional.pad(start_mask.unsqueeze(1).float(), (self.block_size - 1, 0)),
+            kernel_size=self.block_size,
+            stride=1,
+        ).bool()
+
+        masked_feats = torch.where(
+            time_mask,
+            self.mask_embedding.view(1, -1, 1),
+            input_feats,
+        )
+        masks = time_mask.to(input_feats.dtype).expand_as(input_feats)
+        return masked_feats, masks
 
 
 class ConvFeatureMaksingWrapper(NeuralModule):

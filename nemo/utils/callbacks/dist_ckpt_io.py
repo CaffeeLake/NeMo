@@ -1,4 +1,5 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -54,7 +55,7 @@ except (ImportError, ModuleNotFoundError) as e:
     HAVE_MEGATRON_CORE = False
     IMPORT_ERROR = (
         "megatron-core was not found. "
-        "Please see the NeMo README for installation instructions: https://github.com/NVIDIA/NeMo#megatron-gpt."
+        "Please see the NeMo README for installation instructions: https://github.com/NVIDIA-NeMo/Speech#megatron-gpt."
         f" Exact error: {e}"
     )
 
@@ -110,7 +111,12 @@ class AsyncFinalizableCheckpointIO(_WrappingCheckpointIO):
         super().__init__(checkpoint_io)
         self.async_calls_queue = AsyncCallsQueue()
 
-    def save_checkpoint(self, checkpoint: Dict[str, Any], path: _PATH, storage_options: Optional[Any] = None) -> None:
+    def save_checkpoint(
+        self,
+        checkpoint: Dict[str, Any],
+        path: _PATH,
+        storage_options: Optional[Any] = None,
+    ) -> None:
         """Executes async request returned from the underlying checkpoint_io asynchronously.
 
         Requires the underlying checkpoint_io.save_checkpoint to return an AsyncRequest.

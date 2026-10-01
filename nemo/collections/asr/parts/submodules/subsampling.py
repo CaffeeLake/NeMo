@@ -1,4 +1,5 @@
-# Copyright (c) 2020, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2020, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,8 +19,109 @@ import torch
 import torch.nn as nn
 from torch.nn import LayerNorm
 
+from nemo.collections.asr.parts.packed_sequence import PackedEncoderActivations, _new_packed_encoder_activations
 from nemo.collections.asr.parts.submodules.causal_convs import CausalConv1D, CausalConv2D
+from nemo.core.utils.optional_libs import TRITON_AVAILABLE, triton_required
 from nemo.utils import logging
+
+if TRITON_AVAILABLE:
+    from nemo.collections.asr.parts.triton.depthwise_conv import dw_conv2d
+    from nemo.collections.asr.parts.triton.subsampling import fused_conv_relu_dw
+
+
+class FeatureStacking(nn.Module):
+    """Stacks consecutive input frames and projects to model dimension.
+
+    Reduces the temporal resolution by ``subsampling_factor`` while increasing
+    the feature dimension proportionally, then linearly projects back to
+    ``feat_out``.
+
+    Args:
+        subsampling_factor: Number of consecutive frames to stack.
+        feat_in: Input feature dimension.
+        feat_out: Output feature dimension.
+    """
+
+    def __init__(self, subsampling_factor: int, feat_in: int, feat_out: int):
+        super().__init__()
+        self.subsampling_factor = subsampling_factor
+        self.proj = nn.Linear(subsampling_factor * feat_in, feat_out, bias=False)
+
+    def compute_num_out_frames(self, in_frames):
+        return (in_frames + self.subsampling_factor - 1) // self.subsampling_factor
+
+    def get_sampling_frames(self):
+        """Input frames consumed per output frame — probed by the cache-aware streaming utils."""
+        return self.subsampling_factor
+
+    def get_streaming_cache_size(self):
+        """Input-frame look-back needed to reproduce the offline output. Stacking is
+        non-overlapping, so a chunk aligned to ``subsampling_factor`` needs none."""
+        return 0
+
+    def forward(self, x, lengths=None):
+        """
+        Args:
+            x: (B, C, T) input features.
+            lengths: (B,) valid lengths per sample.
+        Returns:
+            x: (B, T', feat_out) stacked and projected features.
+            lengths: (B,) updated lengths after subsampling.
+        """
+        if isinstance(x, PackedEncoderActivations):
+            if lengths is not None:
+                raise ValueError("lengths must be omitted when x is PackedEncoderActivations.")
+            return self.forward_packed(x)
+        if lengths is None:
+            raise ValueError("lengths are required for padded FeatureStacking input.")
+        x = x.transpose(1, 2)  # (B, C, T) -> (B, T, C)
+        b, t, c = x.size()
+        pad_size = (self.subsampling_factor - (t % self.subsampling_factor)) % self.subsampling_factor
+        if pad_size > 0:
+            x = nn.functional.pad(x, (0, 0, 0, pad_size))
+        t_new = (t + pad_size) // self.subsampling_factor
+        x = x.reshape(b, t_new, c * self.subsampling_factor)
+        x = self.proj(x)
+        lengths = self.compute_num_out_frames(lengths)
+        return x, lengths
+
+    def forward_packed(self, packed: PackedEncoderActivations) -> PackedEncoderActivations:
+        """Stack and project token-flat feature sequences without batch padding."""
+        stacked = self.stack_packed(packed)
+        return stacked.with_data(self.proj(stacked.data))
+
+    def stack_packed(self, packed: PackedEncoderActivations) -> PackedEncoderActivations:
+        """Stack token-flat frames, retaining packed metadata for grouped projection."""
+        if packed.data.shape[1] * self.subsampling_factor != self.proj.in_features:
+            raise ValueError(
+                f"Expected packed feature width {self.proj.in_features // self.subsampling_factor}, "
+                f"got {packed.data.shape[1]}."
+            )
+        output_lengths = self.compute_num_out_frames(packed.lengths)
+        output_cu_seqlens = torch.cat(
+            [output_lengths.new_zeros(1, dtype=torch.int32), output_lengths.cumsum(0, dtype=torch.int32)]
+        )
+        slot_count = int(output_cu_seqlens[-1].item()) * self.subsampling_factor
+        slot_indices = torch.arange(slot_count, device=packed.data.device)
+        slot_boundaries = output_cu_seqlens[1:].to(torch.int64) * self.subsampling_factor
+        slot_sequence_ids = torch.bucketize(slot_indices, slot_boundaries, right=True)
+        if isinstance(packed.padding_value, torch.Tensor):
+            slots = packed.padding_value.to(packed.data)[slot_sequence_ids].clone()
+        else:
+            slots = packed.data.new_full((slot_count, packed.data.shape[1]), packed.padding_value)
+        if packed.padded_length is not None and slot_count:
+            slot_starts = output_cu_seqlens[slot_sequence_ids].to(torch.int64) * self.subsampling_factor
+            local_slots = slot_indices - slot_starts
+            slots.masked_fill_(local_slots.unsqueeze(1) >= packed.padded_length, 0.0)
+        if packed.total_tokens:
+            token_indices = torch.arange(packed.total_tokens, device=packed.data.device)
+            sequence_ids = torch.bucketize(token_indices, packed.cu_seqlens[1:], right=True)
+            local_positions = token_indices - packed.cu_seqlens[sequence_ids]
+            slot_positions = output_cu_seqlens[sequence_ids].to(torch.int64) * self.subsampling_factor
+            slots[slot_positions + local_positions] = packed.data
+        stacked = slots.reshape(-1, self.proj.in_features)
+        max_seqlen = self.compute_num_out_frames(packed.max_seqlen)
+        return _new_packed_encoder_activations(stacked, output_lengths, output_cu_seqlens, max_seqlen)
 
 
 class StackingSubsampling(torch.nn.Module):
@@ -59,6 +161,11 @@ class StackingSubsampling(torch.nn.Module):
         return x, lengths
 
 
+# Conv kernels index elements with 32-bit ints, so a tensor entering or leaving a conv must
+# hold fewer than this many elements. See https://github.com/pytorch/pytorch/issues/80020
+_MAX_CONV_NUMEL_32BIT = 2**31 - 1
+
+
 class ConvSubsampling(torch.nn.Module):
     """Convolutional subsampling which supports VGGNet and striding approach introduced in:
     VGGNet Subsampling: Transformer-transducer: end-to-end speech recognition with self-attention (https://arxiv.org/pdf/1910.12977.pdf)
@@ -66,7 +173,7 @@ class ConvSubsampling(torch.nn.Module):
     Args:
         subsampling (str): The subsampling technique from {"vggnet", "striding", "dw-striding"}
         subsampling_factor (int): The subsampling factor which should be a power of 2
-        subsampling_conv_chunking_factor (int): Input chunking factor which can be -1 (no chunking) 
+        subsampling_conv_chunking_factor (int): Input chunking factor which can be -1 (no chunking)
         1 (auto) or a power of 2. Default is 1
         feat_in (int): size of the input features
         feat_out (int): size of the output features
@@ -84,6 +191,7 @@ class ConvSubsampling(torch.nn.Module):
         subsampling_conv_chunking_factor=1,
         activation=nn.ReLU(),
         is_causal=False,
+        use_triton: bool | None = None,
     ):
         super(ConvSubsampling, self).__init__()
         self._subsampling = subsampling
@@ -374,7 +482,18 @@ class ConvSubsampling(torch.nn.Module):
         else:
             raise ValueError(f"Not valid sub-sampling: {subsampling}!")
 
-        self.conv = torch.nn.Sequential(*layers)
+        self.conv = MaskedConvSequential(*layers)
+
+        # The kernels implement `dw_striding`'s layout, [conv, act] + (sampling_num - 1) x
+        # [dw, pw, act], with ReLU baked in; a factor of 2 stops after [conv, act], leaving no
+        # depthwise to fuse.
+        supported = subsampling == 'dw_striding' and self._sampling_num >= 2 and isinstance(activation, nn.ReLU)
+        if use_triton and not supported:
+            logging.warning(
+                "use_triton=True was requested, but the fused kernels only cover dw_striding with "
+                "subsampling_factor >= 4 and a ReLU activation, falling back to PyTorch instead."
+            )
+        self.conv.fuse_triton = supported and (TRITON_AVAILABLE if use_triton is None else use_triton)
 
     def get_sampling_frames(self):
         return [1, self.subsampling_factor]
@@ -382,8 +501,21 @@ class ConvSubsampling(torch.nn.Module):
     def get_streaming_cache_size(self):
         return [0, self.subsampling_factor + 1]
 
+    def _first_conv_output_numel(self, x):
+        """Element count of the first conv's output, the largest activation in the stack.
+
+        ``x`` is the ``(B, T, F)`` input before the channel dim is added. Only valid for the
+        strided 'striding'/'dw_striding' variants; 'vgg' starts with stride-1 convs, so its
+        largest activation is not bounded by this estimate.
+        """
+        b, t, f = x.size()
+        pad = (self._left_padding, self._right_padding)
+        out_t = calculate_conv_output_size(t, self._kernel_size, self._stride, pad)
+        out_f = calculate_conv_output_size(f, self._kernel_size, self._stride, pad)
+        return b * self._conv_channels * out_t * out_f
+
     def forward(self, x, lengths):
-        lengths = calc_length(
+        out_lengths = calc_length(
             lengths,
             all_paddings=self._left_padding + self._right_padding,
             kernel_size=self._kernel_size,
@@ -392,11 +524,8 @@ class ConvSubsampling(torch.nn.Module):
             repeat_num=self._sampling_num,
         )
 
-        # Unsqueeze Channel Axis
-        if self.conv2d_subsampling:
-            x = x.unsqueeze(1)
         # Transpose to Channel First mode
-        else:
+        if not self.conv2d_subsampling:
             x = x.transpose(1, 2)
 
         # split inputs if chunking_factor is set
@@ -405,26 +534,29 @@ class ConvSubsampling(torch.nn.Module):
                 # if subsampling_conv_chunking_factor is 1, we split only if needed
                 # avoiding a bug / feature limiting indexing of tensors to 2**31
                 # see https://github.com/pytorch/pytorch/issues/80020
-                x_ceil = 2 ** 31 / self._conv_channels * self._stride * self._stride
-                if torch.numel(x) > x_ceil:
-                    need_to_split = True
-                else:
-                    need_to_split = False
+                # Split on '>=': at equality the tensor already holds INT_MAX elements, the
+                # value that trips canUse32BitIndexMath. Guard the conv input and its output.
+                need_to_split = (
+                    self._first_conv_output_numel(x) >= _MAX_CONV_NUMEL_32BIT
+                    or torch.numel(x) >= _MAX_CONV_NUMEL_32BIT
+                )
             else:
                 # if subsampling_conv_chunking_factor > 1 we always split
                 need_to_split = True
 
             if need_to_split:
-                x, success = self.conv_split_by_batch(x)
+                x, lengths, success = self.conv_split_by_batch(x, lengths)
                 if not success:  # if unable to split by batch, try by channel
                     if self._subsampling == 'dw_striding':
+                        # TODO: implement lengths inside conv_split_by_channel
                         x = self.conv_split_by_channel(x)
+                        lengths = out_lengths
                     else:
-                        x = self.conv(x)  # try anyway
+                        x, lengths = self.conv(x, lengths)  # try anyway
             else:
-                x = self.conv(x)
+                x, lengths = self.conv(x, lengths)
         else:
-            x = self.conv(x)
+            x, lengths = self.conv(x)
 
         # Flatten Channel and Frequency Axes
         if self.conv2d_subsampling:
@@ -442,8 +574,8 @@ class ConvSubsampling(torch.nn.Module):
             with torch.no_grad():
                 # init conv
                 scale = 1.0 / self._kernel_size
-                dw_max = (self._kernel_size ** 2) ** -0.5
-                pw_max = self._conv_channels ** -0.5
+                dw_max = (self._kernel_size**2) ** -0.5
+                pw_max = self._conv_channels**-0.5
 
                 torch.nn.init.uniform_(self.conv[0].weight, -scale, scale)
                 torch.nn.init.uniform_(self.conv[0].bias, -scale, scale)
@@ -459,11 +591,11 @@ class ConvSubsampling(torch.nn.Module):
                 torch.nn.init.uniform_(self.out.weight, -fc_scale, fc_scale)
                 torch.nn.init.uniform_(self.out.bias, -fc_scale, fc_scale)
 
-    def conv_split_by_batch(self, x):
-        """ Tries to split input by batch, run conv and concat results """
-        b, _, _, _ = x.size()
+    def conv_split_by_batch(self, x, lengths):
+        """Tries to split input by batch, run conv and concat results"""
+        b, *_ = x.size()
         if b == 1:  # can't split if batch size is 1
-            return x, False
+            return x, lengths, False
 
         if self.subsampling_conv_chunking_factor > 1:
             cf = self.subsampling_conv_chunking_factor
@@ -471,20 +603,36 @@ class ConvSubsampling(torch.nn.Module):
         else:
             # avoiding a bug / feature limiting indexing of tensors to 2**31
             # see https://github.com/pytorch/pytorch/issues/80020
-            x_ceil = 2 ** 31 / self._conv_channels * self._stride * self._stride
-            p = math.ceil(math.log(torch.numel(x) / x_ceil, 2))
-            cf = 2 ** p
+            # Smallest power-of-two split with each chunk strictly below the limit (+1 forces
+            # strict); size against the larger of conv input and first-conv output.
+            numel = max(self._first_conv_output_numel(x), torch.numel(x))
+            cf = 2 ** math.ceil(math.log(numel // _MAX_CONV_NUMEL_32BIT + 1, 2))
             logging.debug(f'using auto set chunking factor: {cf}')
 
         new_batch_size = b // cf
-        if new_batch_size == 0:  # input is too big
-            return x, False
+        if new_batch_size == 0:
+            # If cf > b and one sample fits, use single-sample batches rather than the channel
+            # fallback (which runs the full first conv up front).
+            if max(self._first_conv_output_numel(x[:1]), torch.numel(x[:1])) >= _MAX_CONV_NUMEL_32BIT:
+                return x, lengths, False
+            new_batch_size = 1
 
         logging.debug(f'conv subsampling: using split batch size {new_batch_size}')
-        return torch.cat([self.conv(chunk) for chunk in torch.split(x, new_batch_size, 0)]), True
+
+        ans = [
+            self.conv(chunk, ln)
+            for chunk, ln in zip(
+                torch.split(x, new_batch_size, 0),
+                torch.split(lengths, new_batch_size, 0),
+            )
+        ]
+        return torch.cat([a[0] for a in ans]), torch.cat([a[1] for a in ans]), True
 
     def conv_split_by_channel(self, x):
-        """ For dw convs, tries to split input by time, run conv and concat results """
+        """For dw convs, tries to split input by time, run conv and concat results"""
+
+        # Note: this method doesn't use the convolution masking implemented in MaskedConvolutionSequential
+        x = x.unsqueeze(0)
         x = self.conv[0](x)  # full conv2D
         x = self.conv[1](x)  # activation
 
@@ -497,8 +645,8 @@ class ConvSubsampling(torch.nn.Module):
             else:
                 # avoiding a bug / feature limiting indexing of tensors to 2**31
                 # see https://github.com/pytorch/pytorch/issues/80020
-                p = math.ceil(math.log(torch.numel(x) / 2 ** 31, 2))
-                cf = 2 ** p
+                # +1 keeps each chunk strictly below the limit and avoids a fractional factor.
+                cf = 2 ** math.ceil(math.log(torch.numel(x) // _MAX_CONV_NUMEL_32BIT + 1, 2))
                 logging.debug(f'using auto set chunking factor: {cf}')
 
             new_c = int(c // cf)
@@ -520,7 +668,7 @@ class ConvSubsampling(torch.nn.Module):
         return x
 
     def channel_chunked_conv(self, conv, chunk_size, x):
-        """ Performs channel chunked convolution"""
+        """Performs channel chunked convolution"""
 
         ind = 0
         out_chunks = []
@@ -564,7 +712,7 @@ class ConvSubsampling(torch.nn.Module):
 
 
 def calc_length(lengths, all_paddings, kernel_size, stride, ceil_mode, repeat_num=1):
-    """ Calculates the output length of a Tensor passed through a convolution or max pooling layer"""
+    """Calculates the output length of a Tensor passed through a convolution or max pooling layer"""
     add_pad: float = all_paddings - kernel_size
     one: float = 1.0
     for i in range(repeat_num):
@@ -574,71 +722,6 @@ def calc_length(lengths, all_paddings, kernel_size, stride, ceil_mode, repeat_nu
         else:
             lengths = torch.floor(lengths)
     return lengths.to(dtype=torch.int)
-
-
-class TimeReductionModule(nn.Module):
-    """
-    Squeezeformer Time Reduction procedure. Downsamples the audio by `stride` in the time dimension.
-
-    Args:
-        d_model (int): input dimension of MultiheadAttentionMechanism and PositionwiseFeedForward
-        out_dim (int): Output dimension of the module.
-        kernel_size (int): Conv kernel size for depthwise convolution in convolution module
-        stride (int): Downsampling factor in time dimension.
-    """
-
-    def __init__(self, d_model: int, out_dim: int, kernel_size: int = 5, stride: int = 2):
-        super().__init__()
-
-        self.d_model = d_model
-        self.out_dim = out_dim
-        self.kernel_size = kernel_size
-        self.stride = stride
-        self.padding = max(0, self.kernel_size - self.stride)
-
-        self.dw_conv = nn.Conv1d(
-            in_channels=d_model,
-            out_channels=d_model,
-            kernel_size=kernel_size,
-            stride=stride,
-            padding=self.padding,
-            groups=d_model,
-        )
-
-        self.pw_conv = nn.Conv1d(
-            in_channels=d_model, out_channels=out_dim, kernel_size=1, stride=1, padding=0, groups=1,
-        )
-
-        self.reset_parameters()
-
-    def forward(self, x, att_mask=None, pad_mask=None):
-        x = x.transpose(1, 2)  # [B, C, T]
-        if pad_mask is not None:
-            x = x.float().masked_fill(pad_mask.unsqueeze(1), 0.0)
-
-        x = self.dw_conv(x)
-        x = self.pw_conv(x)
-
-        x = x.transpose(1, 2)  # [B, T, C]
-
-        B, T, D = x.size()
-        if att_mask is not None and pad_mask is not None:
-            att_mask = att_mask[:, :: self.stride, :: self.stride]
-            pad_mask = pad_mask[:, :: self.stride]
-            L = pad_mask.size(-1)
-            x = torch.nn.functional.pad(x, (0, 0, 0, L - T))
-
-        return x, att_mask, pad_mask
-
-    def reset_parameters(self):
-        dw_max = self.kernel_size ** -0.5
-        pw_max = self.d_model ** -0.5
-
-        with torch.no_grad():
-            torch.nn.init.uniform_(self.dw_conv.weight, -dw_max, dw_max)
-            torch.nn.init.uniform_(self.dw_conv.bias, -dw_max, dw_max)
-            torch.nn.init.uniform_(self.pw_conv.weight, -pw_max, pw_max)
-            torch.nn.init.uniform_(self.pw_conv.bias, -pw_max, pw_max)
 
 
 class SubsamplingReductionModule(nn.Module):
@@ -651,7 +734,6 @@ class SubsamplingReductionModule(nn.Module):
 
         self.reduction = reduction
         self.d_model = d_model
-        self._sampling_num = int(math.log(reduction_factor, 2))
 
         if reduction == 'pooling':
             self.reduction_enc = nn.MaxPool1d(kernel_size=reduction_factor)
@@ -671,8 +753,8 @@ class SubsamplingReductionModule(nn.Module):
 
     def forward(self, x, lengths):
         """Shapes:
-            - x: [B, T, C]
-            - lengths: [B]
+        - x: [B, T, C]
+        - lengths: [B]
         """
 
         if self.reduction == 'striding':
@@ -685,9 +767,162 @@ class SubsamplingReductionModule(nn.Module):
                 kernel_size=self.kernel_size,
                 stride=self.stride,
                 ceil_mode=False,
-                repeat_num=self._sampling_num,
+                repeat_num=1,  # a single MaxPool1d(kernel_size=reduction_factor) is applied below
             )
             x = self.reduction_enc(x)
             x = torch.transpose(x, 1, 2)  # [B, T, C]
 
         return x, lengths
+
+
+def apply_channel_mask(tensor, mask):
+    """Apply mask to tensor with channel dimension."""
+    # tensor: (batch, channels, time, features)
+    # mask: (batch, time, features)
+    batch_size, channels, time, features = tensor.shape
+    expanded_mask = mask.unsqueeze(1).expand(batch_size, channels, time, features)
+    return tensor * expanded_mask
+
+
+def calculate_conv_output_size(input_size: torch.Tensor, kernel_size: int, stride: int, padding: tuple[int, int]):
+    """Calculate exact output size after convolution."""
+    return (input_size + padding[0] + padding[1] - kernel_size) // stride + 1
+
+
+class MaskedConvSequential(nn.Sequential):
+    # Set by ConvSubsampling; off by default, so every other subsampling type stays on PyTorch.
+    fuse_triton = False
+
+    def forward(self, x, lengths):
+        # Convert input (batch, time, features) to conv format
+        x = x.unsqueeze(1)  # (batch, 1, time, features)
+        current_lengths = lengths
+
+        # Tracing and export cannot capture a Triton launch, the fused kernel returns no input
+        # gradient, and its weight gradients accumulate through atomics, so their summation order
+        # varies between runs.
+        if (
+            self.fuse_triton
+            and x.is_cuda
+            and not x.requires_grad
+            and not torch.are_deterministic_algorithms_enabled()
+            and not (torch.jit.is_tracing() or torch.compiler.is_exporting())
+        ):
+            x, current_lengths, mask = self._forward_fused(x, current_lengths)
+        else:
+            x, current_lengths, mask = self._forward_torch(x, current_lengths)
+
+        # Final masking
+        x = apply_channel_mask(x, mask)
+        return x, current_lengths.long()
+
+    def _forward_torch(self, x, current_lengths):
+        mask = self._create_mask(x, current_lengths.long())
+
+        # Process through each layer with mask propagation
+        for i, layer in enumerate(self):
+            # Apply current mask before layer
+            x = apply_channel_mask(x, mask)
+
+            # Apply layer
+            x = layer(x)
+
+            # Update lengths for stride operations with proper padding
+            if hasattr(layer, 'stride') and layer.stride != (1, 1):
+                current_lengths = calculate_conv_output_size(
+                    current_lengths, layer.kernel_size[0], layer.stride[0], _layer_padding(layer)
+                )
+                mask = self._create_mask(x, current_lengths.long())
+
+        return x, current_lengths, mask
+
+    @triton_required
+    def _forward_fused(self, x, current_lengths):
+        """The `dw_striding` stack, with conv0 and the depthwise layers as Triton kernels.
+
+        The stack is `[conv, act] + (sampling_num - 1) x [dw, pw, act]`. One kernel covers the
+        leading `conv, act, dw`; the loop over `self[3:]` runs each depthwise as a kernel, each
+        pointwise as a linear, and every other layer as itself. Lengths change only at the
+        depthwise layers.
+
+        Tensors are channels-last throughout, `(batch, time, freq, channels)`, and one permute at
+        the end returns the `(batch, channels, time, freq)` the caller expects.
+
+        The kernels read zeros beyond their input lengths and write zeros beyond their output
+        lengths. Only the trailing pointwise and activation touch the padded tail, which
+        `apply_channel_mask` clears at the end of `forward`.
+        """
+        conv0, _, first_depthwise, first_pointwise, activation = self[:5]
+        # conv -> ReLU -> depthwise in one kernel; the intermediate never reaches memory.
+        x, current_lengths = fused_conv_relu_dw(
+            x,
+            conv0.weight,
+            conv0.bias,
+            first_depthwise.weight,
+            first_depthwise.bias,
+            *_layer_padding(conv0),
+            current_lengths,
+        )
+        x = _pointwise_block(x, first_pointwise, activation)
+
+        body = self[5:]
+        for i in range(0, len(body), 3):
+            depthwise, pointwise, activation = body[i : i + 3]
+            # The kernel masks its own output, so it needs the post-stride lengths.
+            next_lengths = calculate_conv_output_size(
+                current_lengths, depthwise.kernel_size[0], depthwise.stride[0], _layer_padding(depthwise)
+            )
+            x = dw_conv2d(
+                x,
+                depthwise.weight,
+                depthwise.bias,
+                depthwise.stride,
+                *_layer_padding(depthwise),
+                current_lengths,
+                next_lengths,
+            )
+            current_lengths = next_lengths
+            x = _pointwise_block(x, pointwise, activation)
+
+        x = x.permute(0, 3, 1, 2)
+        return x, current_lengths, self._create_mask(x, current_lengths.long())
+
+    def _create_mask(self, tensor, lengths):
+        """Create mask matching tensor dimensions."""
+        batch_size, channels, time, features = tensor.shape
+        time_mask = torch.arange(time, device=tensor.device).expand(batch_size, time) < lengths.unsqueeze(1)
+        return time_mask.unsqueeze(-1).expand(batch_size, time, features).to(tensor.dtype)
+
+
+def _layer_padding(layer):
+    """The (start, end) padding of a convolution.
+
+    nn.Conv2d's `.padding` is (pad_h, pad_w), one value per axis and symmetric within it, so the
+    height value is both edges. CausalConv2D keeps its two edges on private attributes.
+    """
+    if hasattr(layer, "_left_padding"):
+        return layer._left_padding, layer._right_padding
+    return layer.padding[0], layer.padding[0]
+
+
+def _is_depthwise(layer):
+    """A depthwise convolution: one group per channel."""
+    return isinstance(layer, nn.Conv2d) and layer.groups > 1
+
+
+def _is_pointwise(layer):
+    """A 1x1 convolution over all channels, which is a contraction over the channel axis alone."""
+    return isinstance(layer, nn.Conv2d) and layer.groups == 1 and layer.kernel_size == (1, 1)
+
+
+def _pointwise_block(x, conv, activation):
+    # kernel_size=1 convs are pointwise, i.e. linear, but nn.Conv2d dispatches to much slower
+    # cuBLAS kernels. flatten(1) on the weight is a free view, so checkpoints are unchanged.
+    # F.linear on an N-D input returns a view of its 2D result. An in-place activation on a
+    # view copies the whole tensor in backward, so x is flattened and the activation runs on
+    # the 2D result itself.
+    # TODO: remove the shape manipulation once https://github.com/pytorch/pytorch/pull/194077
+    # is in the minimum required PyTorch version.
+    b, t, f, c = x.shape
+    x = nn.functional.linear(x.view(-1, c), conv.weight.flatten(1), conv.bias)
+    return activation(x).view(b, t, f, -1)

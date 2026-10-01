@@ -1,4 +1,5 @@
-# Copyright (c) 2021, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2021, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -68,7 +69,7 @@ def build_index(tarpath, indexfile):
         index.create_index()
 
 
-@hydra.main(config_path=None, config_name='index_config')
+@hydra.main(config_path=None, config_name='index_config', version_base="1.1")
 def main(cfg: DALITarredIndexConfig):
     if not INDEX_CREATOR_AVAILABLE:
         logging.error("`wds2idx` is not installed. Please install NVIDIA DALI >= 1.11")

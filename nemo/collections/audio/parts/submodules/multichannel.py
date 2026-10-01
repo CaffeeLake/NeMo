@@ -1,4 +1,5 @@
-# Copyright (c) 2023, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2023, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,16 +21,10 @@ import torch
 
 from nemo.collections.asr.parts.preprocessing.features import make_seq_mask_like
 from nemo.collections.asr.parts.submodules.multi_head_attention import MultiHeadAttention
+from nemo.collections.audio.parts.utils.audio import covariance_matrix
 from nemo.core.classes import NeuralModule, typecheck
 from nemo.core.neural_types import AudioSignal, FloatType, LengthsType, NeuralType, SpectrogramType
 from nemo.utils import logging
-
-try:
-    import torchaudio
-
-    HAVE_TORCHAUDIO = True
-except ModuleNotFoundError:
-    HAVE_TORCHAUDIO = False
 
 
 class ChannelAugment(NeuralModule):
@@ -414,13 +409,6 @@ class ParametricMultichannelWienerFilter(NeuralModule):
         diag_reg: Optional[float] = 1e-6,
         eps: float = 1e-8,
     ):
-        if not HAVE_TORCHAUDIO:
-            logging.error('Could not import torchaudio. Some features might not work.')
-
-            raise ModuleNotFoundError(
-                f"torchaudio is not installed but is necessary to instantiate a {self.__class__.__name__}"
-            )
-
         super().__init__()
 
         # Parametric filter
@@ -447,9 +435,6 @@ class ParametricMultichannelWienerFilter(NeuralModule):
         if eps <= 0:
             raise ValueError(f'Epsilon {eps} must be positive.')
         self.eps = eps
-
-        # PSD estimator
-        self.psd = torchaudio.transforms.PSD()
 
         # Reference channel
         self.ref_channel = ref_channel
@@ -604,8 +589,8 @@ class ParametricMultichannelWienerFilter(NeuralModule):
             mask_n = mask_n.double()
 
             # Calculate signal statistics
-            psd_s = self.psd(input, mask_s)
-            psd_n = self.psd(input, mask_n)
+            psd_s = covariance_matrix(x=input, mask=mask_s)
+            psd_n = covariance_matrix(x=input, mask=mask_n)
 
             if self.rank == 'one':
                 # Calculate filter W using (18) in [1]

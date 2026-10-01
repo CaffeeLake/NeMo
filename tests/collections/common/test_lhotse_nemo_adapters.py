@@ -1,4 +1,5 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,9 +15,9 @@
 
 import numpy as np
 import pytest
-from lhotse import AudioSource, CutSet, MonoCut, Recording, SupervisionSegment
+from lhotse import AudioSource, CutSet, MonoCut, MultiCut, Recording, SupervisionSegment
 from lhotse.serialization import save_to_jsonl
-from lhotse.testing.dummies import DummyManifest
+from lhotse.testing.dummies import DummyManifest, dummy_multi_cut, dummy_supervision
 
 from nemo.collections.common.data.lhotse.nemo_adapters import LazyNeMoIterator
 
@@ -37,6 +38,29 @@ def nemo_manifest_path(tmp_path_factory):
             }
         )
     p = tmpdir / "nemo_manifest.json"
+    save_to_jsonl(nemo, p)
+    return p
+
+
+@pytest.fixture
+def nemo_manifest_path_multichannel(tmp_path_factory):
+    """2 utterances of length 1s with 3 channels as a NeMo manifest."""
+    tmpdir = tmp_path_factory.mktemp("nemo_data")
+    cuts = CutSet.from_cuts(
+        dummy_multi_cut(idx, supervisions=[dummy_supervision(idx)], channel=[0, 1, 2], with_data=True)
+        for idx in range(0, 2)
+    ).save_audios(tmpdir, progress_bar=False)
+    nemo = []
+    for c in cuts:
+        nemo.append(
+            {
+                "audio_filepath": c.recording.sources[0].source,
+                "text": "irrelevant",
+                "duration": c.duration,
+                "lang": "en",
+            }
+        )
+    p = tmpdir / "nemo_manifest_multichannel.json"
     save_to_jsonl(nemo, p)
     return p
 
@@ -74,6 +98,45 @@ def test_lazy_nemo_iterator(nemo_manifest_path):
         assert s.start == 0
         assert s.duration == 1
         assert s.channel == 0
+        assert s.text == "irrelevant"
+        assert s.language == "en"
+
+
+def test_lazy_nemo_iterator_multichannel(nemo_manifest_path_multichannel):
+    cuts = CutSet(LazyNeMoIterator(nemo_manifest_path_multichannel))
+
+    assert len(cuts) == 2
+
+    for c in cuts:
+        assert isinstance(c, MultiCut)
+        assert c.start == 0.0
+        assert c.duration == 1.0
+        assert c.num_channels == 3
+        assert c.channel == [0, 1, 2]  # cuts have three channels
+        assert c.sampling_rate == 16000
+        assert c.num_samples == 16000
+
+        assert c.has_recording
+        assert isinstance(c.recording, Recording)
+        assert c.recording.duration == 1.0
+        assert c.recording.num_channels == 3
+        assert c.recording.num_samples == 16000
+        assert len(c.recording.sources) == 1
+        assert isinstance(c.recording.sources[0], AudioSource)
+        assert c.recording.sources[0].type == "file"
+        assert c.recording.sources[0].channels == c.channel  # recording has same channels as the cut
+
+        audio = c.load_audio()
+        assert isinstance(audio, np.ndarray)
+        assert audio.shape == (c.num_channels, 16000)  # audio has same num_channels as the cut
+        assert audio.dtype == np.float32
+
+        assert len(c.supervisions) == 1
+        s = c.supervisions[0]
+        assert isinstance(s, SupervisionSegment)
+        assert s.start == 0
+        assert s.duration == 1
+        assert s.channel == c.channel  # supervision has same channels as the cut
         assert s.text == "irrelevant"
         assert s.language == "en"
 
@@ -200,3 +263,60 @@ def test_lazy_nemo_iterator_with_offset_metadata_only(nemo_offset_manifest_path)
         assert s.channel == 0
         assert s.text == "irrelevant"
         assert s.language == "en"
+
+
+@pytest.fixture
+def nemo_manifest_path_sample_rate(tmp_path_factory):
+    """2 utterances using 'sample_rate' field instead of 'sampling_rate'."""
+    tmpdir = tmp_path_factory.mktemp("nemo_data_sr")
+    cuts = DummyManifest(CutSet, begin_id=0, end_id=2, with_data=True).save_audios(tmpdir, progress_bar=False)
+    nemo = []
+    for c in cuts:
+        nemo.append(
+            {
+                "audio_filepath": c.recording.sources[0].source,
+                "text": "irrelevant",
+                "duration": c.duration,
+                "sample_rate": c.sampling_rate,
+                "lang": "en",
+            }
+        )
+    p = tmpdir / "nemo_manifest_sr.jsonl"
+    save_to_jsonl(nemo, p)
+    return p
+
+
+def test_lazy_nemo_iterator_sample_rate_fallback(nemo_manifest_path_sample_rate):
+    """Test that LazyNeMoIterator accepts 'sample_rate' when 'sampling_rate' is absent."""
+    cuts = CutSet(LazyNeMoIterator(nemo_manifest_path_sample_rate))
+
+    assert len(cuts) == 2
+
+    for c in cuts:
+        assert isinstance(c, MonoCut)
+        assert c.sampling_rate == 16000
+        assert c.has_recording
+        assert isinstance(c.recording, Recording)
+        assert c.recording.sampling_rate == 16000
+
+        audio = c.load_audio()
+        assert isinstance(audio, np.ndarray)
+        assert audio.shape == (1, 16000)
+
+        # sample_rate should not leak into custom fields
+        assert "sample_rate" not in (c.custom or {})
+
+
+def test_lazy_nemo_iterator_sample_rate_fallback_indexed(nemo_manifest_path_sample_rate):
+    """The shared dict-to-cut helper must also consume 'sample_rate' in indexed mode."""
+    indexing = pytest.importorskip("lhotse.indexing")
+    indexing.create_jsonl_index(str(nemo_manifest_path_sample_rate))
+
+    cuts = CutSet(LazyNeMoIterator(nemo_manifest_path_sample_rate, indexed=True))
+
+    assert len(cuts) == 2
+    for c in cuts:
+        assert isinstance(c, MonoCut)
+        assert c.sampling_rate == 16000
+        assert c.recording.sampling_rate == 16000
+        assert "sample_rate" not in (c.custom or {})

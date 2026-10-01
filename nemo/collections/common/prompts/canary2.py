@@ -1,4 +1,5 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,6 +21,7 @@ from lhotse.cut import Cut, MixedCut
 from lhotse.utils import ifnone
 
 from nemo.collections.common.data.prompt_fn import registered_prompt_format_fn
+from nemo.collections.common.prompts.canary import BOOL_FALSE, BOOL_TRUE, PNC_FALSE, PNC_TRUE
 from nemo.collections.common.prompts.formatter import Modality, PromptFormatter
 from nemo.collections.common.tokenizers.canary_tokenizer import (
     CANARY2_BOCTX,
@@ -28,6 +30,17 @@ from nemo.collections.common.tokenizers.canary_tokenizer import (
     CANARY_SPECIAL_TOKENIZER,
     CanaryTokenizer,
 )
+
+# Use global variables to import slot values in other modules.
+ITN_TRUE = BOOL_TRUE | {
+    "itn",
+    "<|itn|>",
+}
+ITN_FALSE = BOOL_FALSE | {"noitn", "<|noitn|>"}
+TIMESTAMP_TRUE = BOOL_TRUE | {"timestamp", "<|timestamp|>"}
+TIMESTAMP_FALSE = BOOL_FALSE | {"notimestamp", "<|notimestamp|>"}
+DIARIZE_TRUE = BOOL_TRUE | {"diarize", "<|diarize|>"}
+DIARIZE_FALSE = BOOL_FALSE | {"nodiarize", "<|nodiarize|>"}
 
 
 class Canary2PromptFormatter(PromptFormatter):
@@ -50,43 +63,13 @@ class Canary2PromptFormatter(PromptFormatter):
                 # Transcription language - specified by the user.
                 "target_lang": Modality.Text,
                 # Should we predict punctuation and capitalization?
-                "pnc": Modality.TextLiteral(
-                    "yes", "no", "true", "True", "false", "False", "1", "0", "pnc", "nopnc", "<|pnc|>", "<|nopnc|>"
-                ),
+                "pnc": Modality.TextLiteral(*(PNC_TRUE | PNC_FALSE)),
                 # Should we predict with inverse text normalization (numerals as digits, abbreviations, etc.)
-                "itn": Modality.TextLiteral(
-                    "yes", "no", "true", "True", "false", "False", "1", "0", "itn", "noitn", "<|itn|>", "<|noitn|>"
-                ),
+                "itn": Modality.TextLiteral(*(ITN_TRUE | ITN_FALSE)),
                 # Should we predict timestamps?
-                "timestamp": Modality.TextLiteral(
-                    "yes",
-                    "no",
-                    "true",
-                    "True",
-                    "false",
-                    "False",
-                    "1",
-                    "0",
-                    "timestamp",
-                    "notimestamp",
-                    "<|timestamp|>",
-                    "<|notimestamp|>",
-                ),
-                # Should we diarize speech?
-                "diarize": Modality.TextLiteral(
-                    "yes",
-                    "no",
-                    "true",
-                    "True",
-                    "false",
-                    "False",
-                    "1",
-                    "0",
-                    "diarize",
-                    "nodiarize",
-                    "<|diarize|>",
-                    "<|nodiarize|>",
-                ),
+                "timestamp": Modality.TextLiteral(*(TIMESTAMP_TRUE | TIMESTAMP_FALSE)),
+                # # Should we diarize speech?
+                "diarize": Modality.TextLiteral(*(DIARIZE_TRUE | DIARIZE_FALSE)),
             },
         },
         # User prompt.
@@ -97,6 +80,16 @@ class Canary2PromptFormatter(PromptFormatter):
             "slots": {
                 # Empty string or previous transcript / other context to bias predictions.
                 "decodercontext": Modality.Text,
+            },
+        },
+        # User prompt.
+        # This role is used for injecting partial transcription for the current audio input.
+        # Use it as the last turn in the prompt to allow for resuming the transcription after a ceratin point.
+        # https://github.com/openai/whisper/discussions/117
+        "user_prefix": {
+            "template": "|prefix|",
+            "slots": {
+                "prefix": Modality.Text,
             },
         },
         # System's reponse.
@@ -119,6 +112,29 @@ class Canary2PromptFormatter(PromptFormatter):
         return super().encode_turn(
             prompt_template=prompt_template, expected_slots=expected_slots, slot_values=slot_values
         )
+
+    def get_default_dialog_slots(self) -> list[dict]:
+        """
+        Returns a list of dialog turns that can be used as a skeleton to fill with actual slot values.
+        If ``PromptFormatter`` was initialized with ``defaults`` argument, this method will return the
+        defaults. Otherwise, every slot is pre-filled with ``None``.
+        """
+
+        def _get_default_for_role(role: str) -> dict:
+            for turn in self._defaults:
+                if turn["role"] == role:
+                    return turn
+            return {}
+
+        role = "user"
+        return [
+            {
+                "role": role,
+                "slots": {
+                    slot: _get_default_for_role(role).get("slots", {}).get(slot) for slot in self.get_slots(role)
+                },
+            }
+        ]
 
 
 def map_manifest_values_to_special_tokens(slot_values: dict[str, str]) -> dict[str, str]:
@@ -201,7 +217,7 @@ def canary2(cut: Cut, prompt: Canary2PromptFormatter) -> dict[str, torch.Tensor]
         eos = prompt.tokenizer.eos
     else:  # SPE
         eos = prompt.tokenizer.token_to_id(CANARY_EOS)
-    assert eos > -1, "Invalid tokenizer: tokenizer.token_to_id('{CANARY_EOS}') returned {eos}"
+    assert eos > -1, f"Invalid tokenizer: tokenizer.token_to_id('{CANARY_EOS}') returned {eos}"
     assert (
         ans["answer_ids"][-1].item() == eos
     ), f"Expected the last token in answer_ids to be EOS, but we got {ans['answer_ids']}"

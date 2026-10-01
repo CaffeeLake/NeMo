@@ -1,4 +1,5 @@
-# Copyright (c) 2020, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2020, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -32,9 +33,11 @@ from nemo.collections.asr.parts.utils.eval_utils import cal_write_wer
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
 from nemo.collections.asr.parts.utils.transcribe_utils import (
     compute_output_filename,
+    get_inference_dtype,
     prepare_audio_data,
     restore_transcription_order,
     setup_model,
+    wire_confidence_cfg,
     write_transcription,
 )
 from nemo.core.config import hydra_runner
@@ -153,8 +156,10 @@ class TranscriptionConfig:
     allow_mps: bool = False  # allow to select MPS device (Apple Silicon M-series GPU)
     amp: bool = False
     amp_dtype: str = "float16"  # can be set to "float16" or "bfloat16" when using amp
-    compute_dtype: str = "float32"
-    matmul_precision: str = "highest"  # Literal["highest", "high", "medium"]
+    compute_dtype: Optional[str] = (
+        None  # "float32", "bfloat16" or "float16"; if None (default): bfloat16 if available else float32
+    )
+    matmul_precision: str = "high"  # Literal["highest", "high", "medium"]
     audio_type: str = "wav"
 
     # Recompute model transcription, even if the output folder exists with scores.
@@ -202,6 +207,8 @@ class TranscriptionConfig:
     gt_lang_attr_name: str = "lang"
 
     extract_nbest: bool = False  # Extract n-best hypotheses from the model
+
+    confidence: bool = False  # output token and word confidence in the manifest
 
     calculate_rtfx: bool = False
     warmup_steps: int = 0  # by default - no warmup
@@ -268,19 +275,30 @@ def main(cfg: TranscriptionConfig) -> Union[TranscriptionConfig, List[Hypothesis
     asr_model.set_trainer(trainer)
     asr_model = asr_model.eval()
 
-    if cfg.compute_dtype != "float32" and cfg.amp:
+    if (cfg.compute_dtype is not None and cfg.compute_dtype != "float32") and cfg.amp:
         raise ValueError("amp=true is mutually exclusive with a compute_dtype other than float32")
 
     amp_dtype = torch.float16 if cfg.amp_dtype == "float16" else torch.bfloat16
 
-    if cfg.compute_dtype != "float32":
-        asr_model.to(getattr(torch, cfg.compute_dtype))
+    compute_dtype: torch.dtype
+    if cfg.amp:
+        # with amp model weights required to be in float32
+        compute_dtype = torch.float32
+    else:
+        compute_dtype = get_inference_dtype(compute_dtype=cfg.compute_dtype, device=map_location)
+
+    asr_model.to(compute_dtype)
 
     # we will adjust this flag if the model does not support it
     compute_langs = cfg.compute_langs
 
     if cfg.timestamps:
         cfg.return_hypotheses = True
+
+    if cfg.confidence:
+        cfg.return_hypotheses = True
+        wire_confidence_cfg(cfg.rnnt_decoding, enabled=True)
+        wire_confidence_cfg(cfg.ctc_decoding, enabled=True)
 
     # Check whether model and decoder type match
     if isinstance(asr_model, EncDecCTCModel):
@@ -293,7 +311,7 @@ def main(cfg: TranscriptionConfig) -> Union[TranscriptionConfig, List[Hypothesis
         if cfg.decoder_type and cfg.decoder_type != 'rnnt':
             raise ValueError('RNNT model only support rnnt decoding!')
 
-    if cfg.decoder_type and hasattr(asr_model.encoder, 'set_default_att_context_size'):
+    if cfg.att_context_size and hasattr(asr_model.encoder, 'set_default_att_context_size'):
         asr_model.encoder.set_default_att_context_size(cfg.att_context_size)
 
     # Setup decoding strategy
@@ -456,6 +474,7 @@ def main(cfg: TranscriptionConfig) -> Union[TranscriptionConfig, List[Hypothesis
         filepaths=filepaths,
         compute_langs=compute_langs,
         timestamps=cfg.timestamps,
+        confidence=cfg.confidence,
     )
     logging.info(f"Finished writing predictions to {output_filename}!")
 

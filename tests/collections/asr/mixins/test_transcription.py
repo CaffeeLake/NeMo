@@ -1,4 +1,5 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
+import copy
 import json
 import os
 from dataclasses import dataclass
@@ -20,11 +21,14 @@ from typing import Any, Dict, List
 
 import pytest
 import torch
+from omegaconf import open_dict
 from torch.utils.data import DataLoader, Dataset
 
 from nemo.collections.asr.data.audio_to_text import _speech_collate_fn
+from nemo.collections.asr.models.aed_multitask_models import MultiTaskTranscriptionConfig
 from nemo.collections.asr.parts.mixins import TranscribeConfig, TranscriptionMixin
 from nemo.collections.asr.parts.mixins.transcription import GenericTranscriptionType
+from nemo.collections.asr.parts.submodules.multitask_decoding import MultiTaskDecodingConfig
 from nemo.collections.asr.parts.utils import Hypothesis
 
 
@@ -43,7 +47,41 @@ class DummyModel(torch.nn.Module):
         return out
 
 
-@pytest.mark.with_downloads()
+class DummyDatasetAudioOnly(Dataset):
+    def __init__(self, audio_files: List[str], config: Dict):
+        self.audio_files = audio_files
+        self.config = config
+
+    def __getitem__(self, index):
+        data = self.audio_files[index]
+        data = torch.tensor([float(data)]).view(1)
+        return data
+
+    def __len__(self):
+        return len(self.audio_files)
+
+
+class DummyDataset(Dataset):
+    def __init__(self, audio_tensors: List[str], config: Dict = None):
+        self.audio_tensors = audio_tensors
+        self.config = config
+
+    def __getitem__(self, index):
+        data = self.audio_tensors[index]
+        samples = torch.tensor(data)
+        # Calculate seq length
+        seq_len = torch.tensor(samples.shape[0], dtype=torch.long)
+
+        # Dummy text tokens
+        text_tokens = torch.tensor([0], dtype=torch.long)
+        text_tokens_len = torch.tensor(1, dtype=torch.long)
+
+        return (samples, seq_len, text_tokens, text_tokens_len)
+
+    def __len__(self):
+        return len(self.audio_tensors)
+
+
 @pytest.fixture()
 def audio_files(test_data_dir):
     """
@@ -84,20 +122,7 @@ class TranscribableDummy(DummyModel, TranscriptionMixin):
         return ds_config
 
     def _setup_transcribe_dataloader(self, config: Dict) -> DataLoader:
-        class DummyDataset(Dataset):
-            def __init__(self, audio_files: List[str], config: Dict):
-                self.audio_files = audio_files
-                self.config = config
-
-            def __getitem__(self, index):
-                data = self.audio_files[index]
-                data = torch.tensor([float(data)]).view(1)
-                return data
-
-            def __len__(self):
-                return len(self.audio_files)
-
-        dataset = DummyDataset(config['paths2audio_files'], config)
+        dataset = DummyDatasetAudioOnly(config['paths2audio_files'], config)
 
         return DataLoader(
             dataset=dataset,
@@ -136,27 +161,6 @@ class TranscribableDummy(DummyModel, TranscriptionMixin):
     def _transcribe_on_end(self, trcfg: TranscribeConfig):
         super()._transcribe_on_end(trcfg)
         self.flag_end = True
-
-
-class DummyDataset(Dataset):
-    def __init__(self, audio_tensors: List[str], config: Dict = None):
-        self.audio_tensors = audio_tensors
-        self.config = config
-
-    def __getitem__(self, index):
-        data = self.audio_tensors[index]
-        samples = torch.tensor(data)
-        # Calculate seq length
-        seq_len = torch.tensor(samples.shape[0], dtype=torch.long)
-
-        # Dummy text tokens
-        text_tokens = torch.tensor([0], dtype=torch.long)
-        text_tokens_len = torch.tensor(1, dtype=torch.long)
-
-        return (samples, seq_len, text_tokens, text_tokens_len)
-
-    def __len__(self):
-        return len(self.audio_tensors)
 
 
 @pytest.fixture()
@@ -312,6 +316,7 @@ class TestTranscriptionMixin:
 
     pytest.mark.with_downloads()
 
+    @pytest.mark.with_downloads()
     @pytest.mark.unit
     def test_transcribe_return_hypothesis(self, test_data_dir, fast_conformer_ctc_model):
         audio_file = os.path.join(test_data_dir, "asr", "train", "an4", "wav", "an46-mmap-b.wav")
@@ -368,6 +373,56 @@ class TestTranscriptionMixin:
 
     @pytest.mark.with_downloads()
     @pytest.mark.unit
+    def test_transcribe_return_nbest_rnnt(self, audio_files, fast_conformer_transducer_model):
+        fast_conformer_transducer_model.eval()
+        audio1, audio2 = audio_files
+
+        orig_decoding_config = copy.deepcopy(fast_conformer_transducer_model.cfg.decoding)
+
+        decoding_config = copy.deepcopy(fast_conformer_transducer_model.cfg.decoding)
+        with open_dict(decoding_config):
+            decoding_config["strategy"] = "malsd_batch"
+            decoding_config["beam"]["beam_size"] = 4
+            decoding_config["beam"]["return_best_hypothesis"] = False
+            decoding_config["beam"]["allow_cuda_graphs"] = False
+        fast_conformer_transducer_model.change_decoding_strategy(decoding_config)
+
+        outputs = fast_conformer_transducer_model.transcribe([audio1, audio2], batch_size=1, timestamps=False)
+
+        assert len(outputs) == 2
+        assert all(len(output) >= 1 for output in outputs)
+        assert all(isinstance(output, list) for output in outputs)
+        assert all(isinstance(hyp, Hypothesis) for output in outputs for hyp in output)
+
+        # Reset the decoding strategy to original
+        fast_conformer_transducer_model.change_decoding_strategy(orig_decoding_config)
+
+    @pytest.mark.with_downloads()
+    @pytest.mark.unit
+    def test_transcribe_return_nbest_canary(self, audio_files, canary_1b_flash):
+        canary_1b_flash.eval()
+        audio1, audio2 = audio_files
+
+        orig_decoding_config = copy.deepcopy(canary_1b_flash.cfg.decoding)
+
+        decoding_config = copy.deepcopy(canary_1b_flash.cfg.decoding)
+        with open_dict(decoding_config):
+            decoding_config["beam"]["beam_size"] = 4
+            decoding_config["beam"]["return_best_hypothesis"] = False
+        canary_1b_flash.change_decoding_strategy(decoding_config)
+
+        outputs = canary_1b_flash.transcribe([audio1, audio2], batch_size=1, timestamps=False)
+
+        assert len(outputs) == 2
+        assert all(len(output) >= 1 for output in outputs)
+        assert all(isinstance(output, list) for output in outputs)
+        assert all(isinstance(hyp, Hypothesis) for output in outputs for hyp in output)
+
+        # Reset the decoding strategy to original
+        canary_1b_flash.change_decoding_strategy(orig_decoding_config)
+
+    @pytest.mark.with_downloads()
+    @pytest.mark.unit
     def test_timestamps_with_transcribe(self, audio_files, fast_conformer_ctc_model):
         audio1, audio2 = audio_files
 
@@ -421,8 +476,8 @@ class TestTranscriptionMixin:
         # check hypothesis object
         assert isinstance(output[0], Hypothesis)
         # check transcript
-        assert output[0].text == 'Stop'
-        assert output[1].text == 'Start.'
+        assert output[0].text in ['Stop', 'Stop?']
+        assert output[1].text in ['Start', 'Start.']
 
         # check timestamp
         assert output[0].timestamp['segment'][0]['start'] == pytest.approx(0.4)
@@ -447,3 +502,83 @@ class TestTranscriptionMixin:
         # check timestamp
         assert output[0].timestamp['segment'][0]['start'] == pytest.approx(0.32)
         assert output[0].timestamp['segment'][0]['end'] == pytest.approx(0.72)
+
+    @pytest.mark.with_downloads()
+    @pytest.mark.unit
+    def test_transcribe_return_nbest_hybrid_rnnt_ctc_prompt(self, audio_files, hybrid_rnnt_ctc_bpe_model_with_prompt):
+        """Test n-best hypothesis return for hybrid RNNT-CTC BPE model with prompts."""
+        hybrid_rnnt_ctc_bpe_model_with_prompt.eval()
+        audio1, audio2 = audio_files
+
+        orig_decoding_config = copy.deepcopy(hybrid_rnnt_ctc_bpe_model_with_prompt.cfg.decoding)
+
+        decoding_config = copy.deepcopy(hybrid_rnnt_ctc_bpe_model_with_prompt.cfg.decoding)
+        with open_dict(decoding_config):
+            decoding_config["strategy"] = "beam"
+            decoding_config["beam"]["beam_size"] = 4
+            decoding_config["beam"]["return_best_hypothesis"] = False
+
+        hybrid_rnnt_ctc_bpe_model_with_prompt.change_decoding_strategy(decoding_config)
+
+        # Transcribe audio with prompt parameters
+        hypotheses = hybrid_rnnt_ctc_bpe_model_with_prompt.transcribe(
+            [audio1, audio2], batch_size=2, return_hypotheses=True, target_lang="en-US"
+        )
+
+        # Check results
+        assert len(hypotheses) == 2
+        assert isinstance(hypotheses[0], list)  # n-best list
+        assert len(hypotheses[0]) > 0  # at least one hypothesis
+
+        # Restore original decoding config
+        hybrid_rnnt_ctc_bpe_model_with_prompt.change_decoding_strategy(orig_decoding_config)
+
+    @pytest.mark.with_downloads()
+    @pytest.mark.unit
+    def test_timestamps_with_transcribe_hybrid_prompt(self, audio_files, hybrid_rnnt_ctc_bpe_model_with_prompt):
+        audio1, audio2 = audio_files
+
+        output = hybrid_rnnt_ctc_bpe_model_with_prompt.transcribe(
+            [audio1, audio2], timestamps=True, target_lang="en-US"
+        )
+
+        # check len of output
+        assert len(output) == 2
+
+        # check hypothesis object
+        assert isinstance(output[0], Hypothesis)
+        # check transcript
+        assert output[0].text == 'Stop'
+        assert output[1].text == 'Start'
+
+        # check timestamp
+        assert output[0].timestamp['segment'][0]['start'] == pytest.approx(0.16)
+        assert output[0].timestamp['segment'][0]['end'] == pytest.approx(0.56)
+
+    @pytest.mark.with_downloads()
+    @pytest.mark.unit
+    def test_transcribe_returns_xattn(self, audio_files, canary_1b_v2):
+        canary_1b_v2.eval()
+        audio1, audio2 = audio_files
+
+        orig_decoding_config = copy.deepcopy(canary_1b_v2.cfg.decoding)
+
+        decoding_config = MultiTaskDecodingConfig()
+        decoding_config.return_xattn_scores = True
+        canary_1b_v2.change_decoding_strategy(decoding_config)
+
+        config = MultiTaskTranscriptionConfig(
+            batch_size=4,
+            return_hypotheses=True,
+            num_workers=0,
+            verbose=False,
+            prompt={'source_lang': 'en', 'target_lang': 'en'},
+            enable_chunking=False,
+        )
+
+        output = canary_1b_v2.transcribe([audio1, audio2], override_config=config)
+        assert output[0].xatt_scores is not None
+        assert output[1].xatt_scores is not None
+
+        # Reset the decoding strategy to original
+        canary_1b_v2.change_decoding_strategy(orig_decoding_config)

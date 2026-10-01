@@ -1,4 +1,5 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -26,19 +27,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from pathlib import Path
 from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
+from omegaconf import DictConfig
 from tqdm import tqdm
 
 from nemo.collections.asr.modules import rnnt_abstract
+from nemo.collections.asr.parts.submodules.ngram_lm import NGramGPULanguageModel
 from nemo.collections.asr.parts.submodules.rnnt_beam_decoding import pack_hypotheses
 from nemo.collections.asr.parts.submodules.tdt_malsd_batched_computer import ModifiedALSDBatchedTDTComputer
 from nemo.collections.asr.parts.utils.asr_confidence_utils import ConfidenceMethodMixin
-from nemo.collections.asr.parts.utils.rnnt_batched_beam_utils import BlankLMScoreMode, PruningMode
+from nemo.collections.asr.parts.utils.batched_beam_decoding_utils import BlankLMScoreMode, PruningMode
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis, NBestHypotheses, is_prefix
+from nemo.collections.common.parts.optional_cuda_graphs import WithOptionalCudaGraphs
 from nemo.core.classes import Typing, typecheck
 from nemo.core.neural_types import AcousticEncodedRepresentation, HypothesisType, LengthsType, NeuralType
 from nemo.utils import logging
@@ -266,14 +269,8 @@ class BeamTDTInfer(Typing):
         if ngram_lm_model:
             if search_type != "maes":
                 raise ValueError("For decoding with language model `maes` decoding strategy must be chosen.")
-
-            if KENLM_AVAILABLE:
-                self.ngram_lm = kenlm.Model(ngram_lm_model)
-                self.ngram_lm_alpha = ngram_lm_alpha
-            else:
-                raise ImportError(
-                    "KenLM package (https://github.com/kpu/kenlm) is not installed. " "Use ngram_lm_model=None."
-                )
+            self.ngram_lm = ngram_lm_model
+            self.ngram_lm_alpha = ngram_lm_alpha
         else:
             self.ngram_lm = None
 
@@ -829,13 +826,14 @@ class BeamTDTInfer(Typing):
             return sorted(hyps, key=lambda x: x.score, reverse=True)
 
 
-class BeamBatchedTDTInfer(Typing, ConfidenceMethodMixin):
+class BeamBatchedTDTInfer(Typing, ConfidenceMethodMixin, WithOptionalCudaGraphs):
     @property
     def input_types(self):
         """Returns definitions of module input ports."""
         return {
             "encoder_output": NeuralType(('B', 'D', 'T'), AcousticEncodedRepresentation()),
             "encoded_lengths": NeuralType(tuple('B'), LengthsType()),
+            "multi_biasing_ids": NeuralType(tuple('B'), optional=True),
             "partial_hypotheses": [NeuralType(elements_type=HypothesisType(), optional=True)],  # must always be last
         }
 
@@ -850,12 +848,16 @@ class BeamBatchedTDTInfer(Typing, ConfidenceMethodMixin):
         score_norm: bool = True,
         max_symbols_per_step: Optional[int] = None,
         preserve_alignments: bool = False,
-        ngram_lm_model: Optional[str | Path] = None,
-        ngram_lm_alpha: float = 0.0,
+        fusion_models: Optional[List[NGramGPULanguageModel]] = None,
+        fusion_models_alpha: Optional[List[float]] = None,
         blank_lm_score_mode: Optional[str | BlankLMScoreMode] = BlankLMScoreMode.NO_SCORE,
         pruning_mode: Optional[str | PruningMode] = PruningMode.EARLY,
         allow_cuda_graphs: Optional[bool] = True,
         return_best_hypothesis: Optional[str] = True,
+        enable_per_stream_biasing: bool = False,
+        preserve_step_confidence: bool = False,
+        include_duration_confidence: bool = False,
+        confidence_method_cfg: Optional[DictConfig] = None,
     ):
         """
         Init method.
@@ -867,12 +869,16 @@ class BeamBatchedTDTInfer(Typing, ConfidenceMethodMixin):
             beam_size: beam size
             max_symbols_per_step: max symbols to emit on each step (to avoid infinite looping)
             preserve_alignments: if alignments are needed
-            ngram_lm_model: path to the NGPU-LM n-gram LM model: .arpa or .nemo formats
-            ngram_lm_alpha: weight for the n-gram LM scores
+            fusion_models: list of fusion models to use for decoding
+            fusion_models_alpha: list of alpha values for fusion models
             blank_lm_score_mode: mode for scoring blank symbol with LM
             pruning_mode: mode for pruning hypotheses with LM
             allow_cuda_graphs: whether to allow CUDA graphs
             score_norm: whether to normalize scores before best hypothesis extraction
+            enable_per_stream_biasing: whether to enable per-stream biasing via multi-boosting tree
+            preserve_step_confidence: if step confidence should be preserved in beam hypotheses
+            include_duration_confidence: if duration confidence is requested (not supported; logged and skipped)
+            confidence_method_cfg: config for the confidence estimation method
         """
         super().__init__()
         self.decoder = decoder_model
@@ -893,7 +899,7 @@ class BeamBatchedTDTInfer(Typing, ConfidenceMethodMixin):
         if search_type == "malsd_batch":
             # Depending on availability of `blank_as_pad` support
             # switch between more efficient batch decoding technique
-            self._decoding_computer = ModifiedALSDBatchedTDTComputer(
+            self.decoding_computer = ModifiedALSDBatchedTDTComputer(
                 decoder=self.decoder,
                 joint=self.joint,
                 durations=durations,
@@ -901,14 +907,30 @@ class BeamBatchedTDTInfer(Typing, ConfidenceMethodMixin):
                 blank_index=self._blank_index,
                 max_symbols_per_step=self.max_symbols,
                 preserve_alignments=preserve_alignments,
-                ngram_lm_model=ngram_lm_model,
-                ngram_lm_alpha=ngram_lm_alpha,
+                fusion_models=fusion_models,
+                fusion_models_alpha=fusion_models_alpha,
                 blank_lm_score_mode=blank_lm_score_mode,
                 pruning_mode=pruning_mode,
                 allow_cuda_graphs=allow_cuda_graphs,
+                enable_per_stream_biasing=enable_per_stream_biasing,
+                preserve_step_confidence=preserve_step_confidence,
+                include_duration_confidence=include_duration_confidence,
+                confidence_method_cfg=confidence_method_cfg,
             )
         else:
             raise Exception(f"Decoding strategy {search_type} nor implemented.")
+
+    def disable_cuda_graphs(self) -> bool:
+        """Disable CUDA graphs (e.g., for decoding in training)"""
+        if isinstance(self.decoding_computer, WithOptionalCudaGraphs):
+            return self.decoding_computer.disable_cuda_graphs()
+        return False
+
+    def maybe_enable_cuda_graphs(self) -> bool:
+        """Enable CUDA graphs (if allowed)"""
+        if isinstance(self.decoding_computer, WithOptionalCudaGraphs):
+            return self.decoding_computer.maybe_enable_cuda_graphs()
+        return False
 
     @property
     def output_types(self):
@@ -924,20 +946,24 @@ class BeamBatchedTDTInfer(Typing, ConfidenceMethodMixin):
         encoder_output: torch.Tensor,
         encoded_lengths: torch.Tensor,
         partial_hypotheses: Optional[list[Hypothesis]] = None,
+        multi_biasing_ids: Optional[torch.Tensor] = None,
     ) -> Tuple[list[Hypothesis] | List[NBestHypotheses]]:
         """Returns a list of hypotheses given an input batch of the encoder hidden embedding.
         Output token is generated auto-regressively.
+
         Args:
             encoder_output: A tensor of size (batch, features, timesteps).
             encoded_lengths: list of int representing the length of each sequence
                 output sequence.
+
         Returns:
-            Tuple[list[Hypothesis] | List[NBestHypotheses]]: Tuple of a list of hypotheses for each batch. Each hypothesis contains
-                the decoded sequence, timestamps and associated scores. The format of the returned hypotheses depends
-                on the `return_best_hypothesis` attribute:
-                    - If `return_best_hypothesis` is True, returns the best hypothesis for each batch.
-                    - Otherwise, returns the N-best hypotheses for each batch.
+            Tuple of a list of hypotheses for each batch. Each hypothesis contains
+            the decoded sequence, timestamps and associated scores.
+            If ``return_best_hypothesis`` is True, returns the best hypothesis for each batch;
+            otherwise, returns the N-best hypotheses for each batch.
         """
+        if partial_hypotheses is not None:
+            raise NotImplementedError("Partial hypotheses feature is not yet supported in batched beam search.")
         # Preserve decoder and joint training state
         decoder_training_state = self.decoder.training
         joint_training_state = self.joint.training
@@ -951,7 +977,9 @@ class BeamBatchedTDTInfer(Typing, ConfidenceMethodMixin):
             self.joint.eval()
 
             inseq = encoder_output  # [B, T, D]
-            batched_beam_hyps = self._decoding_computer(x=inseq, out_len=logitlen)
+            batched_beam_hyps, _ = self.decoding_computer(
+                x=inseq, out_len=logitlen, multi_biasing_ids=multi_biasing_ids
+            )
 
             # Ensures the correct number of hypotheses (batch_size) for CUDA Graphs compatibility
             batch_size = encoder_output.shape[0]

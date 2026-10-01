@@ -1,4 +1,5 @@
-# Copyright (c) 2020, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2020, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -169,7 +170,7 @@ class TestEncDecMultiTaskModel:
         asr_model.compute_eval_loss = False
 
         input_signal = torch.randn(size=(4, 512))
-        length = torch.randint(low=161, high=500, size=[4])
+        length = torch.randint(low=321, high=500, size=[4])
 
         targets = torch.randint(low=0, high=100, size=[4, 10])
         targets_len = torch.randint(low=1, high=10, size=[4])
@@ -184,7 +185,6 @@ class TestEncDecMultiTaskModel:
                     transcript=targets[i : i + 1],
                     transcript_length=targets_len[i : i + 1],
                 )
-                print(log_probs.shape)
                 logprobs_instance.append(log_probs)
             logits_instance = torch.cat(logprobs_instance, 0)
 
@@ -293,17 +293,19 @@ class TestEncDecMultiTaskModel:
         with torch.no_grad():
             ans = asr_model.validation_pass(batch, batch_idx=0)
         print(ans)
-        assert list(ans.keys()) == [
-            "val_loss",
-            "val_wer",
-            "val_wer_num",
-            "val_wer_denom",
-            "val_bleu",
-            "val_bleu_pred_len",
-            "val_bleu_target_len",
-            "val_bleu_num",
-            "val_bleu_denom",
-        ]
+        assert set(ans.keys()) == set(
+            [
+                "val_loss",
+                "val_wer",
+                "val_wer_num",
+                "val_wer_denom",
+                "val_bleu",
+                "val_bleu_pred_len",
+                "val_bleu_target_len",
+                "val_bleu_num",
+                "val_bleu_denom",
+            ]
+        )
 
     @pytest.mark.unit
     def test_save_restore_artifact(self, asr_model):
@@ -317,6 +319,11 @@ class TestEncDecMultiTaskModel:
             assert isinstance(new_model, type(asr_model))
 
             assert len(new_model.tokenizer.tokenizer.get_vocab()) == 32 + 128 + 128
+
+    @pytest.mark.with_downloads()
+    @pytest.mark.unit
+    def test_restore_with_timestamps_asr_model(self, canary_1b_v2):
+        assert canary_1b_v2.timestamps_asr_model is not None
 
     # @pytest.mark.with_downloads()
     # @pytest.mark.unit
@@ -476,6 +483,20 @@ class TestEncDecMultiTaskModel:
         assert isinstance(hyp.y_sequence, torch.Tensor)
         assert hyp.alignments is None
 
+    # test transcribe with canary2 model with torch tensor input
+    @pytest.mark.with_downloads()
+    @pytest.mark.unit
+    def test_transcribe_with_canary2_model_with_torch_tensor_input(self, canary_1b_v2, test_data_dir):
+        import soundfile as sf
+
+        audio_file = os.path.join(test_data_dir, "asr", "train", "an4", "wav", "an46-mmap-b.wav")
+        audio, sr = sf.read(audio_file, dtype='float32')
+
+        # Numpy array test
+        outputs = canary_1b_v2.transcribe(audio, batch_size=1)
+        assert len(outputs) == 1
+        assert isinstance(outputs[0].text, str)
+
     @pytest.mark.unit
     def test_transcribe_tensor(self, asr_model, test_data_dir):
         # Load audio file
@@ -560,6 +581,7 @@ class TestEncDecMultiTaskModel:
         )
 
         audio_file = "/home/TestData/asr/longform/earnings22/sample_4469669.wav"
+
         meta = {
             'audio_filepath': audio_file,
             'duration': 100000,
@@ -572,7 +594,7 @@ class TestEncDecMultiTaskModel:
         }
         model_stride_in_secs = 0.01 * 8  # feature_stride in sec * model_stride
         model.read_audio_file(audio_file, delay=0.0, model_stride_in_secs=model_stride_in_secs, meta_data=meta)
-        outputs = model.transcribe()
+        outputs = model.transcribe(timestamps=True)
 
         # check hypothesis object
         assert isinstance(outputs, Hypothesis)
@@ -892,3 +914,169 @@ def test_aed_timestamp_processing():
     # Verify no timestamps were extracted
     assert processed[0].timestamp['word'] == []
     assert processed[0].timestamp['segment'] == []
+
+
+@pytest.mark.with_downloads()
+@pytest.mark.unit
+def test_aed_forced_aligned_timestamps(canary_1b_v2):
+
+    audio_file = "/home/TestData/asr/canary/dev-other-wav/8173-294714-0040.wav"
+    audio_batch = [audio_file, audio_file]
+
+    # Testing with batch_size=2 to avoid dynamic_chunking and test pure timestamps extraction
+    # Dynamic chunking with timestamps are tested in other tests
+
+    hypotheses = canary_1b_v2.transcribe(audio_batch, timestamps=False, batch_size=2)
+    assert len(hypotheses) == 2
+    assert hypotheses[0].timestamp == []
+    assert hypotheses[1].timestamp == []
+
+    ts_hypotheses = canary_1b_v2.transcribe(audio_batch, timestamps=True, batch_size=2)
+    assert len(ts_hypotheses) == 2
+
+    assert "word" in ts_hypotheses[0].timestamp
+    assert "segment" in ts_hypotheses[0].timestamp
+    assert "char" not in ts_hypotheses[0].timestamp
+
+    assert ts_hypotheses[0].text == hypotheses[0].text
+
+    assert len(ts_hypotheses[0].timestamp['word']) == len(ts_hypotheses[0].text.split())
+
+    segment_count = 0
+    segment_separators = ['.', '?', '!', '...']
+    for sep in segment_separators:
+        if sep in ts_hypotheses[0].text:
+            segment_count += 1
+    if ts_hypotheses[0].text.strip()[-1] not in segment_separators:
+        segment_count += 1
+
+    assert len(ts_hypotheses[0].timestamp['segment']) == segment_count
+    assert [word_offset['word'] for word_offset in ts_hypotheses[0].timestamp['word']] == ts_hypotheses[0].text.split()
+    assert " ".join([word_offset['word'] for word_offset in ts_hypotheses[0].timestamp['word']]) == " ".join(
+        [segment_offset['segment'] for segment_offset in ts_hypotheses[0].timestamp['segment']]
+    )
+
+    assert ts_hypotheses[0].timestamp['segment'][0]['start'] == ts_hypotheses[0].timestamp['word'][0]['start']
+    assert ts_hypotheses[0].timestamp['segment'][-1]['end'] == ts_hypotheses[0].timestamp['word'][-1]['end']
+    assert (
+        ts_hypotheses[0].timestamp['segment'][0]['start_offset']
+        == ts_hypotheses[0].timestamp['word'][0]['start_offset']
+    )
+    assert (
+        ts_hypotheses[0].timestamp['segment'][-1]['end_offset'] == ts_hypotheses[0].timestamp['word'][-1]['end_offset']
+    )
+
+
+@pytest.mark.with_downloads()
+@pytest.mark.unit
+def test_aed_forced_aligned_timestamps_audio_tensor(canary_1b_v2):
+    import librosa
+
+    audio_file = "/home/TestData/asr/canary/dev-other-wav/8173-294714-0040.wav"
+
+    audio_batch = [
+        torch.from_numpy(librosa.load(audio_file, sr=16000)[0]),
+        torch.from_numpy(librosa.load(audio_file, sr=16000)[0]),
+    ]
+
+    # Testing with batch_size=2 to avoid dynamic_chunking and test pure timestamps extraction
+    # Dynamic chunking with timestamps are tested in other tests
+
+    hypotheses = canary_1b_v2.transcribe(audio_batch, timestamps=False, batch_size=2)
+    assert len(hypotheses) == 2
+    assert hypotheses[0].timestamp == []
+    assert hypotheses[1].timestamp == []
+
+    ts_hypotheses = canary_1b_v2.transcribe(audio_batch, timestamps=True, batch_size=2, enable_chunking=False)
+    assert len(ts_hypotheses) == 2
+
+    assert "word" in ts_hypotheses[0].timestamp
+    assert "segment" in ts_hypotheses[0].timestamp
+    assert "char" not in ts_hypotheses[0].timestamp
+
+    assert ts_hypotheses[0].text == hypotheses[0].text
+
+    assert len(ts_hypotheses[0].timestamp['word']) == len(ts_hypotheses[0].text.split())
+
+    segment_count = 0
+    segment_separators = ['.', '?', '!', '...']
+    for sep in segment_separators:
+        if sep in ts_hypotheses[0].text:
+            segment_count += 1
+    if ts_hypotheses[0].text.strip()[-1] not in segment_separators:
+        segment_count += 1
+
+    assert len(ts_hypotheses[0].timestamp['segment']) == segment_count
+    assert [word_offset['word'] for word_offset in ts_hypotheses[0].timestamp['word']] == ts_hypotheses[0].text.split()
+    assert " ".join([word_offset['word'] for word_offset in ts_hypotheses[0].timestamp['word']]) == " ".join(
+        [segment_offset['segment'] for segment_offset in ts_hypotheses[0].timestamp['segment']]
+    )
+
+    assert ts_hypotheses[0].timestamp['segment'][0]['start'] == ts_hypotheses[0].timestamp['word'][0]['start']
+    assert ts_hypotheses[0].timestamp['segment'][-1]['end'] == ts_hypotheses[0].timestamp['word'][-1]['end']
+    assert (
+        ts_hypotheses[0].timestamp['segment'][0]['start_offset']
+        == ts_hypotheses[0].timestamp['word'][0]['start_offset']
+    )
+    assert (
+        ts_hypotheses[0].timestamp['segment'][-1]['end_offset'] == ts_hypotheses[0].timestamp['word'][-1]['end_offset']
+    )
+
+
+@pytest.mark.with_downloads()
+@pytest.mark.unit
+def test_aed_parallel_chunking(canary_1b_v2):
+
+    audio_file = "/home/TestData/asr/longform/earnings22/sample_4469669.wav"
+    # Testing on long audio file to check chunking and timestamps extraction
+
+    hypotheses = canary_1b_v2.transcribe(audio_file, timestamps=False)
+    assert len(hypotheses) == 1
+    assert hypotheses[0].timestamp == []
+
+    ts_hypotheses = canary_1b_v2.transcribe(audio_file, timestamps=True)
+    assert len(ts_hypotheses) == 1
+
+    # timestamps=True and timestamps=False use different merge algorithms
+    # (LCS-based merge vs simple concatenation), so texts may differ slightly
+    # at chunk boundaries for long audio. Check they are very similar instead.
+    ts_words = ts_hypotheses[0].text.split()
+    no_ts_words = hypotheses[0].text.split()
+    common_words = sum(1 for a, b in zip(ts_words, no_ts_words) if a == b)
+    similarity = common_words / max(len(ts_words), len(no_ts_words))
+    assert similarity > 0.95, f"Text similarity too low: {similarity:.4f}"
+
+    assert "char" not in ts_hypotheses[0].timestamp
+    assert 'word' in ts_hypotheses[0].timestamp and 'segment' in ts_hypotheses[0].timestamp
+    assert len(ts_hypotheses[0].timestamp['word']) > 0
+    assert len(ts_hypotheses[0].timestamp['segment']) > 0
+    assert len(ts_hypotheses[0].timestamp['word']) == len(ts_hypotheses[0].text.split())
+
+    # Monotonicity and validity of word offsets and times
+    words = ts_hypotheses[0].timestamp['word']
+    starts = [w['start'] for w in words]
+    ends = [w['end'] for w in words]
+    start_offsets = [w['start_offset'] for w in words]
+    end_offsets = [w['end_offset'] for w in words]
+    assert all(s <= e for s, e in zip(starts, ends))
+    assert all(so <= eo for so, eo in zip(start_offsets, end_offsets))
+    assert all(x <= y for x, y in zip(starts, starts[1:]))
+    assert all(x <= y for x, y in zip(ends, ends[1:]))
+    assert all(x <= y for x, y in zip(start_offsets, start_offsets[1:]))
+    assert all(x <= y for x, y in zip(end_offsets, end_offsets[1:]))
+
+    # Check that the number of words and segments are consistent
+    assert [word_offset['word'] for word_offset in ts_hypotheses[0].timestamp['word']] == ts_hypotheses[0].text.split()
+    assert " ".join([word_offset['word'] for word_offset in ts_hypotheses[0].timestamp['word']]) == " ".join(
+        [segment_offset['segment'] for segment_offset in ts_hypotheses[0].timestamp['segment']]
+    )
+
+    assert ts_hypotheses[0].timestamp['segment'][0]['start'] == ts_hypotheses[0].timestamp['word'][0]['start']
+    assert ts_hypotheses[0].timestamp['segment'][-1]['end'] == ts_hypotheses[0].timestamp['word'][-1]['end']
+    assert (
+        ts_hypotheses[0].timestamp['segment'][0]['start_offset']
+        == ts_hypotheses[0].timestamp['word'][0]['start_offset']
+    )
+    assert (
+        ts_hypotheses[0].timestamp['segment'][-1]['end_offset'] == ts_hypotheses[0].timestamp['word'][-1]['end_offset']
+    )

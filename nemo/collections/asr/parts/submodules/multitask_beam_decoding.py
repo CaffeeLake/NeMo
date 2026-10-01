@@ -1,4 +1,5 @@
-# Copyright (c) 2024, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,7 +14,7 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Union
 
@@ -21,8 +22,10 @@ import torch
 
 from nemo.collections.asr.modules.transformer import (
     BeamSearchSequenceGenerator,
-    BeamSearchSequenceGeneratorWithNGramLM,
+    BeamSearchSequenceGeneratorWithFusionModels,
 )
+from nemo.collections.asr.parts.context_biasing import BoostingTreeModelConfig, GPUBoostingTreeModel
+from nemo.collections.asr.parts.submodules.ngram_lm import NGramGPULanguageModel
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis, NBestHypotheses
 from nemo.collections.common.tokenizers.tokenizer_spec import TokenizerSpec
 from nemo.core import Typing, typecheck
@@ -31,7 +34,10 @@ from nemo.utils import logging
 
 
 def pack_hypotheses(
-    hypotheses: List[Hypothesis], beam_hypotheses: torch.Tensor, scores: List[Optional[float]]
+    hypotheses: List[Hypothesis],
+    beam_hypotheses: torch.Tensor,
+    scores: List[Optional[float]],
+    xatt_scores_list: List[torch.Tensor] = None,
 ) -> List[Hypothesis]:
 
     for idx, hyp in enumerate(hypotheses):  # type: Hypothesis
@@ -46,6 +52,9 @@ def pack_hypotheses(
 
         if hyp.dec_state is not None:
             hyp.dec_state = _states_to_device(hyp.dec_state)
+
+        if xatt_scores_list is not None:
+            hyp.xatt_scores = [xatt_layer[idx] for xatt_layer in xatt_scores_list]
 
     return hypotheses
 
@@ -135,6 +144,9 @@ class TransformerAEDBeamInfer(AEDBeamInfer, Typing):
         preserve_alignments: bool = False,
         ngram_lm_model: Path | str | None = None,
         ngram_lm_alpha: float = 0.0,
+        boosting_tree: BoostingTreeModelConfig | None = None,
+        boosting_tree_alpha: float = 0.0,
+        return_xattn_scores: bool = False,
     ):
         super().__init__(
             transformer_decoder=transformer_decoder,
@@ -148,7 +160,24 @@ class TransformerAEDBeamInfer(AEDBeamInfer, Typing):
         self.bos = tokenizer.bos
         self.pad = tokenizer.pad
         self.eos = tokenizer.eos
-        if ngram_lm_model is None:
+
+        # load boosting tree model
+        boosting_tree_model = None
+        if boosting_tree and not BoostingTreeModelConfig.is_empty(boosting_tree):
+            boosting_tree_model = GPUBoostingTreeModel.from_config(boosting_tree, tokenizer=tokenizer)
+
+        # initialize fusion models (ngram LM, boosting tree)
+        fusion_models, fusion_models_alpha = [], []
+        if ngram_lm_model is not None:
+            fusion_models.append(
+                NGramGPULanguageModel.from_file(lm_path=ngram_lm_model, vocab_size=tokenizer.vocab_size)
+            )
+            fusion_models_alpha.append(ngram_lm_alpha)
+        if boosting_tree_model is not None:
+            fusion_models.append(boosting_tree_model)
+            fusion_models_alpha.append(boosting_tree_alpha)
+
+        if not fusion_models:
             self.beam_search = BeamSearchSequenceGenerator(
                 embedding=transformer_decoder.embedding,
                 decoder=transformer_decoder.decoder,
@@ -160,9 +189,10 @@ class TransformerAEDBeamInfer(AEDBeamInfer, Typing):
                 eos=self.eos,
                 len_pen=length_penalty,
                 max_delta_length=max_generation_delta,
+                return_xattn_scores=return_xattn_scores,
             )
         else:
-            self.beam_search = BeamSearchSequenceGeneratorWithNGramLM(
+            self.beam_search = BeamSearchSequenceGeneratorWithFusionModels(
                 embedding=transformer_decoder.embedding,
                 decoder=transformer_decoder.decoder,
                 log_softmax=log_softmax_module,
@@ -173,8 +203,9 @@ class TransformerAEDBeamInfer(AEDBeamInfer, Typing):
                 eos=self.eos,
                 len_pen=length_penalty,
                 max_delta_length=max_generation_delta,
-                ngram_lm_model=ngram_lm_model,
-                ngram_lm_alpha=ngram_lm_alpha,
+                fusion_models=fusion_models,
+                fusion_models_alpha=fusion_models_alpha,
+                return_xattn_scores=return_xattn_scores,
             )
 
         self.preserve_alignments = preserve_alignments
@@ -205,7 +236,10 @@ class TransformerAEDBeamInfer(AEDBeamInfer, Typing):
             packed list containing batch number of sentences (Hypotheses).
         """
         with torch.inference_mode():
-            topk_hypotheses, beam_scores, best_hypo = self.beam_search(
+            self.transformer_decoder.eval()
+            self.log_softmax_module.eval()
+
+            topk_hypotheses, beam_scores, best_hypo, xatt_scores_list = self.beam_search(
                 encoder_hidden_states=encoder_hidden_states,
                 encoder_input_mask=encoder_input_mask,
                 decoder_input_ids=decoder_input_ids,
@@ -220,21 +254,28 @@ class TransformerAEDBeamInfer(AEDBeamInfer, Typing):
                     hypotheses = [Hypothesis(score=0.0, y_sequence=[], timestamp=[]) for _ in range(self.beam_size)]
                     # Pack results into Hypotheses
                     hypotheses = pack_hypotheses(hypotheses, topk_hypotheses[i], beam_scores[i])
-                    self.format_hypotheses(hypotheses, decoder_input_ids)
                     packed_result.append(NBestHypotheses(hypotheses))
+                self.format_hypotheses(packed_result, decoder_input_ids)
             else:
                 beam_scores = [None for _ in range(len(best_hypo))]
                 best_hypo = best_hypo.detach().cpu()
+                if xatt_scores_list is not None:
+                    xatt_scores_list = [xatt_layer.detach().cpu() for xatt_layer in xatt_scores_list]
                 hypotheses = [
                     Hypothesis(score=0.0, y_sequence=[], timestamp=[]) for _ in range(encoder_hidden_states.shape[0])
                 ]
                 # Pack results into Hypotheses
-                packed_result = pack_hypotheses(hypotheses, best_hypo, beam_scores)
+                packed_result = pack_hypotheses(hypotheses, best_hypo, beam_scores, xatt_scores_list)
                 self.format_hypotheses(packed_result, decoder_input_ids)
+
+        self.transformer_decoder.train()
+        self.log_softmax_module.train()
 
         return (packed_result,)
 
-    def format_hypotheses(self, packed_result: List[Hypothesis], decoder_input_ids: Union[torch.Tensor, None]) -> None:
+    def format_hypotheses(
+        self, packed_result: List[Hypothesis | NBestHypotheses], decoder_input_ids: Union[torch.Tensor, None]
+    ) -> None:
         """
         For each hypothesis in the mini-batch:
         * Remove the decoder input ids (prompt) from the predictions
@@ -246,21 +287,30 @@ class TransformerAEDBeamInfer(AEDBeamInfer, Typing):
                 len(packed_result) == decoder_input_ids.shape[0]
             ), f"Mismatching number of examples {len(packed_result)=} {decoder_input_ids.shape[0]=}"
             decoder_input_ids = decoder_input_ids.detach().cpu()
-            for hyp, prefix in zip(packed_result, decoder_input_ids):
-                assert (
-                    hyp.y_sequence[: prefix.shape[0]] == prefix
-                ).all(), f"The decoder input IDs were not found at the beginning of prediction: {hyp.y_sequence=} {prefix=})"
-                hyp.y_sequence = hyp.y_sequence[prefix.shape[0] :]
-        for hyp in packed_result:
-            ids = hyp.y_sequence
-            ids_len = ids.shape[0]
-            pos = -1
-            while ids[pos] == self.pad or ids[pos] == self.eos:
-                pos -= 1
-                if ids_len + pos == -1:
-                    break  # empty sequence
-            if pos < -1:
-                hyp.y_sequence = ids[: pos + 1]
+
+            for h, prefix in zip(packed_result, decoder_input_ids):
+                hypotheses = h.n_best_hypotheses if isinstance(h, NBestHypotheses) else [h]
+                for hyp in hypotheses:
+                    assert (hyp.y_sequence[: prefix.shape[0]] == prefix).all(), (
+                        f"The decoder input IDs were not found at the beginning of prediction: "
+                        f"{hyp.y_sequence=} {prefix=}"
+                    )
+                    hyp.y_sequence = hyp.y_sequence[prefix.shape[0] :]
+
+        for h in packed_result:
+            hyps = h.n_best_hypotheses if isinstance(h, NBestHypotheses) else [h]
+            for hyp in hyps:
+                ids = hyp.y_sequence
+                ids_len = ids.shape[0]
+                pos = -1
+                while ids[pos] == self.pad or ids[pos] == self.eos:
+                    pos -= 1
+                    if ids_len + pos == -1:
+                        break  # empty sequence
+                if pos < -1:
+                    hyp.y_sequence = ids[: pos + 1]
+                    if hyp.xatt_scores is not None:
+                        hyp.xatt_scores = [xatt_layer[:, : pos + 1, :] for xatt_layer in hyp.xatt_scores]
 
 
 @dataclass
@@ -271,6 +321,8 @@ class AEDBeamInferConfig:
     max_generation_delta: int = -1  # -1 means up to the max length of the decoder
     return_best_hypothesis: bool = True
     preserve_alignments: bool = False
-    # ngram LM params
+    # fusion models params
     ngram_lm_model: Optional[str] = None
     ngram_lm_alpha: float = 0.0
+    boosting_tree: BoostingTreeModelConfig = field(default_factory=lambda: BoostingTreeModelConfig(depth_scaling=1.0))
+    boosting_tree_alpha: float = 0.0
